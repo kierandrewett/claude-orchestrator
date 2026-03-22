@@ -29,7 +29,9 @@ RUN mkdir -p shared/src server/src client/src \
 COPY shared/ ./shared/
 COPY server/  ./server/
 COPY client/  ./client/
-RUN cargo build --release -p claude-server
+# Touch source files so Cargo sees them as newer than the stub artifacts.
+RUN find shared/src server/src -name '*.rs' | xargs touch \
+    && cargo build --release -p claude-server
 
 # ── Stage 3: Minimal runtime image ────────────────────────────────────────────
 FROM debian:bookworm-slim
