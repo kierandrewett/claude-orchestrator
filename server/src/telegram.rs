@@ -15,7 +15,7 @@
 //! Claude (e.g. `/compact`, `/help`).
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -84,9 +84,27 @@ type ChatStates = Arc<RwLock<HashMap<i64, ChatState>>>;
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// Set of allowed Telegram user IDs. Empty means allow everyone.
+type AllowedUsers = Arc<HashSet<u64>>;
+
 pub async fn start(app_state: Arc<AppState>, token: String) {
     info!("telegram: starting bot");
     let bot = Bot::new(token);
+
+    // Parse TELEGRAM_ALLOWED_USERS="123456789,987654321"
+    let allowed: AllowedUsers = Arc::new(
+        std::env::var("TELEGRAM_ALLOWED_USERS")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|s| s.trim().parse::<u64>().ok())
+            .collect(),
+    );
+
+    if allowed.is_empty() {
+        warn!("telegram: TELEGRAM_ALLOWED_USERS is not set — bot is open to everyone");
+    } else {
+        info!("telegram: allowlist has {} user(s)", allowed.len());
+    }
 
     if let Err(e) = bot.set_my_commands(Cmd::bot_commands()).await {
         warn!("telegram: failed to register commands: {e}");
@@ -95,6 +113,11 @@ pub async fn start(app_state: Arc<AppState>, token: String) {
     let states: ChatStates = Arc::new(RwLock::new(HashMap::new()));
 
     let handler = Update::filter_message()
+        .filter(|msg: Message, allowed: AllowedUsers| {
+            // Pass through if allowlist is empty OR user ID is in it
+            let uid = msg.from().map(|u| u.id.0).unwrap_or(0);
+            allowed.is_empty() || allowed.contains(&uid)
+        })
         .branch(
             dptree::entry()
                 .filter_command::<Cmd>()
@@ -103,7 +126,7 @@ pub async fn start(app_state: Arc<AppState>, token: String) {
         .branch(dptree::endpoint(handle_message));
 
     Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![app_state, states])
+        .dependencies(dptree::deps![app_state, states, allowed])
         .build()
         .dispatch()
         .await;
