@@ -131,7 +131,7 @@ async fn do_run(
         .into_owned();
 
     // --- 4. Start Firecracker ---
-    let vm = FirecrackerVm::start(
+    let mut vm = FirecrackerVm::start(
         &vm_cfg.firecracker_path,
         &api_sock,
         &vsock_sock,
@@ -210,7 +210,7 @@ async fn do_run(
                     }
                     Some(S2C::KillSession { .. }) => {
                         info!("vm: KillSession received, shutting down VM");
-                        vm.graceful_shutdown().await;
+                        vm.kill().await;
                         // Give VM a moment before we close the streams
                         tokio::time::sleep(Duration::from_secs(1)).await;
                         break;
@@ -260,7 +260,7 @@ async fn do_run(
     }
 
     // --- 8. Shutdown VM ---
-    vm.graceful_shutdown().await;
+    vm.kill().await;
     let exit_code = tokio::time::timeout(Duration::from_secs(10), vm.wait())
         .await
         .unwrap_or(-1);
