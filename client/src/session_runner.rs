@@ -159,7 +159,7 @@ pub async fn run_session(
     tokio::spawn(async move {
         let mut lines = BufReader::new(stderr_pipe).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            debug!("session {session_id_stderr} [stderr]: {line}");
+            warn!("session {session_id_stderr} [stderr]: {line}");
         }
     });
 
