@@ -83,6 +83,34 @@ impl VmConfig {
             .join("vm.toml")
     }
 
+    /// Default XDG data directory for VM artefacts.
+    fn default_data_dir() -> PathBuf {
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("claude-client")
+            .join("vm")
+    }
+
+    /// Build a config with auto-detected values. Used when no `vm.toml` exists
+    /// yet so the user can see sensible defaults before saving.
+    pub fn detect_defaults() -> Self {
+        let data_dir = Self::default_data_dir();
+        let firecracker_path = which::which("firecracker")
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "/usr/bin/firecracker".to_string());
+        Self {
+            enabled: false,
+            firecracker_path,
+            kernel_path: data_dir.join("vmlinux").to_string_lossy().into_owned(),
+            rootfs_path: data_dir.join("rootfs.ext4").to_string_lossy().into_owned(),
+            data_dir: data_dir.to_string_lossy().into_owned(),
+            vcpus: 2,
+            memory_mb: 2048,
+            mounts: Vec::new(),
+            tools: ToolsConfig::default(),
+        }
+    }
+
     /// Load from disk. Returns `None` if the file doesn't exist.
     pub fn load() -> anyhow::Result<Option<Self>> {
         let path = Self::config_path();

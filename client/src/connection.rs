@@ -310,28 +310,11 @@ async fn handle_text_message(
         S2C::GetVmConfig { request_id } => {
             let ws_tx_clone = Arc::clone(ws_tx);
             tokio::spawn(async move {
-                match crate::vm::config::VmConfig::load() {
-                    Ok(Some(cfg)) => {
-                        ws_send(
-                            &ws_tx_clone,
-                            &C2S::VmConfig {
-                                request_id,
-                                config: cfg.into(),
-                            },
-                        )
-                        .await;
-                    }
-                    Ok(None) => {
-                        ws_send(
-                            &ws_tx_clone,
-                            &C2S::VmConfigAck {
-                                request_id,
-                                success: false,
-                                error: Some("no vm.toml found".to_string()),
-                            },
-                        )
-                        .await;
-                    }
+                let cfg = match crate::vm::config::VmConfig::load() {
+                    Ok(Some(cfg)) => cfg,
+                    // No file yet — return auto-detected defaults so the server
+                    // can show them to the user before they've run /vminit.
+                    Ok(None) => crate::vm::config::VmConfig::detect_defaults(),
                     Err(e) => {
                         ws_send(
                             &ws_tx_clone,
@@ -342,8 +325,17 @@ async fn handle_text_message(
                             },
                         )
                         .await;
+                        return;
                     }
-                }
+                };
+                ws_send(
+                    &ws_tx_clone,
+                    &C2S::VmConfig {
+                        request_id,
+                        config: cfg.into(),
+                    },
+                )
+                .await;
             });
         }
 

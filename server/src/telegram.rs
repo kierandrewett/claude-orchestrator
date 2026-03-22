@@ -70,8 +70,8 @@ enum Cmd {
     #[command(description = "Stop Claude immediately")]
     Stop,
     // ── VM management ──
-    #[command(description = "Create initial VM config: /vminit <firecracker> <kernel> <rootfs> [data_dir]")]
-    Vminit(String),
+    #[command(description = "Save auto-detected VM config to disk")]
+    Vminit,
     #[command(description = "Set a VM path field: /vmset firecracker|kernel|rootfs|datadir|vcpus|memory <value>")]
     Vmset(String),
     #[command(description = "Show VM config")]
@@ -322,32 +322,11 @@ async fn handle_command(
 
         // ── VM management commands ──────────────────────────────────────────
 
-        Cmd::Vminit(args) => {
-            let parts: Vec<&str> = args.split_whitespace().collect();
-            if parts.len() < 3 {
-                bot.send_message(
-                    chat_id,
-                    "Usage: /vminit <firecracker_path> <kernel_path> <rootfs_path> [data_dir]\n\
-                     Example: /vminit /usr/bin/firecracker /home/user/vmlinux /home/user/rootfs.ext4",
-                )
-                .await?;
-                return Ok(());
-            }
-            let firecracker_path = parts[0].to_string();
-            let kernel_path = parts[1].to_string();
-            let rootfs_path = parts[2].to_string();
-            let data_dir = parts
-                .get(3)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "/var/lib/claude-vm".to_string());
-
-            vm_update_config(&bot, chat_id, &app_state, move |c| {
-                c.firecracker_path = firecracker_path;
-                c.kernel_path = kernel_path;
-                c.rootfs_path = rootfs_path;
-                c.data_dir = data_dir;
-            })
-            .await?;
+        Cmd::Vminit => {
+            // Save the auto-detected defaults (returned by the client when no
+            // vm.toml exists) to disk. After this, /vmconfig shows the saved
+            // config and /vmset can override individual fields.
+            vm_update_config(&bot, chat_id, &app_state, |_| {}).await?;
         }
 
         Cmd::Vmset(args) => {
@@ -858,8 +837,10 @@ where
 {
     let mut cfg = match vm_get_config(app_state).await {
         Ok(c) => c,
-        // No config yet — start from an empty default so commands can bootstrap it.
-        Err(_) => VmConfigProto::default(),
+        Err(e) => {
+            bot.send_message(chat_id, format!("❌ {e}")).await?;
+            return Ok(());
+        }
     };
 
     mutate(&mut cfg);
