@@ -147,7 +147,7 @@ fn greyscale(pixels: &mut Vec<u8>) {
     }
 }
 
-/// Draw a red pill badge with a digit (or "9+") in the bottom-right corner.
+/// Draw a red pill badge with a digit (or "+") in the bottom-right corner.
 fn draw_badge(pixels: &mut Vec<u8>, w: u32, h: u32, count: usize) {
     let label: &[u8] = match count {
         1 => b"1",
@@ -162,13 +162,13 @@ fn draw_badge(pixels: &mut Vec<u8>, w: u32, h: u32, count: usize) {
         _ => b"+",
     };
 
-    // Badge is 11×11 px, anchored to bottom-right with 1px margin
-    let badge_size: i32 = 11;
-    let bx = w as i32 - badge_size - 1; // top-left x of badge
-    let by = h as i32 - badge_size - 1; // top-left y of badge
-    let r = badge_size / 2;
-    let cx = bx + r;
-    let cy = by + r;
+    // Badge is 16×16 px, flush to bottom-right corner.
+    let badge_size: i32 = 16;
+    let bx = w as i32 - badge_size;
+    let by = h as i32 - badge_size;
+    let r = badge_size / 2 - 1; // radius slightly inside the bounding box
+    let cx = bx + badge_size / 2;
+    let cy = by + badge_size / 2;
 
     // Filled red circle
     for py in 0..h as i32 {
@@ -181,18 +181,23 @@ fn draw_badge(pixels: &mut Vec<u8>, w: u32, h: u32, count: usize) {
         }
     }
 
-    // Single digit centred in the badge using a 3×5 bitmap font
+    // Digit rendered at 2× scale (each font pixel → 2×2 block) for readability.
+    // Base font is 3 wide × 5 tall; scaled glyph is 6 wide × 10 tall.
     let glyph = digit_glyph(label[0]);
-    // Centre the 3×5 glyph inside the 11×11 badge
-    let gx = cx - 1; // left edge of glyph
-    let gy = cy - 2; // top edge of glyph
+    let scale: i32 = 2;
+    let gx = cx - (3 * scale) / 2; // left edge, horizontally centred
+    let gy = cy - (5 * scale) / 2; // top edge, vertically centred
     for (row, bits) in glyph.iter().enumerate() {
         for col in 0..3i32 {
             if (bits >> (2 - col)) & 1 == 1 {
-                let px = gx + col;
-                let py = gy + row as i32;
-                if px >= 0 && py >= 0 && px < w as i32 && py < h as i32 {
-                    set_pixel(pixels, w, px as u32, py as u32, [255, 255, 255, 255]);
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        let px = gx + col * scale + dx;
+                        let py = gy + row as i32 * scale + dy;
+                        if px >= 0 && py >= 0 && px < w as i32 && py < h as i32 {
+                            set_pixel(pixels, w, px as u32, py as u32, [255, 255, 255, 255]);
+                        }
+                    }
                 }
             }
         }

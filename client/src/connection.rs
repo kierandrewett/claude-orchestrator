@@ -70,7 +70,7 @@ pub async fn run_forever(
             _ = tokio::time::sleep(std::time::Duration::from_secs(backoff)) => {}
         }
 
-        backoff = (backoff * 2).min(30);
+        backoff = (backoff * 2).min(10);
     }
 }
 
