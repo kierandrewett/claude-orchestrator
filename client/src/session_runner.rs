@@ -1,11 +1,8 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures_util::SinkExt;
-use std::process::Stdio;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
 use tokio::sync::{mpsc, Mutex};
-use tracing::{debug, info, warn};
+use tracing::warn;
 
 use crate::protocol::{AttachedFile, SessionStats, C2S, S2C};
 
@@ -27,310 +24,51 @@ pub type WsSink = futures_util::stream::SplitSink<
 
 /// Spawns a Claude process for this session, streams its output back as
 /// `C2S::SessionEvent` messages, and forwards stdin commands from the server.
+/// Runs a Claude session inside a Firecracker microVM.
 ///
-/// If VM mode is enabled in the config, Claude **only** runs inside the
-/// Firecracker VM — it is never spawned on the host. If the config file exists
-/// but cannot be parsed, the session is aborted rather than falling back to the
-/// host.
+/// Claude is **never** spawned on the host. If the VM config cannot be loaded
+/// or is missing, the session is aborted with an error.
 pub async fn run_session(
     config: SessionConfig,
     ws_tx: Arc<Mutex<WsSink>>,
     cmd_rx: mpsc::Receiver<S2C>,
 ) {
-    match crate::vm::config::VmConfig::load() {
-        Ok(Some(vm_cfg)) if vm_cfg.enabled => {
-            // VM mode is explicitly enabled — run inside Firecracker only.
-            crate::vm::run_vm_session(config, ws_tx, cmd_rx, vm_cfg).await;
-        }
-        Ok(Some(_)) | Ok(None) => {
-            // VM mode disabled or no config file — run directly on host.
-            run_session_direct(config, ws_tx, cmd_rx).await;
-        }
-        Err(e) => {
-            // Config exists but failed to load — refuse to run on host.
+    let vm_cfg = match crate::vm::config::VmConfig::load() {
+        Ok(Some(cfg)) => cfg,
+        Ok(None) => {
             tracing::error!(
-                "session {}: VM config could not be loaded, refusing to run on host: {e}",
-                config.session_id
+                "session {}: no VM config found at {} — refusing to run on host",
+                config.session_id,
+                crate::vm::config::VmConfig::config_path().display(),
             );
-            ws_send(
-                &ws_tx,
-                &crate::protocol::C2S::SessionEnded {
-                    session_id: config.session_id,
-                    exit_code: 1,
-                    stats: Default::default(),
-                },
-            )
-            .await;
+            abort_session(&ws_tx, config.session_id).await;
+            return;
         }
-    }
-}
-
-async fn run_session_direct(
-    config: SessionConfig,
-    ws_tx: Arc<Mutex<WsSink>>,
-    mut cmd_rx: mpsc::Receiver<S2C>,
-) {
-    let session_id = config.session_id.clone();
-    info!(
-        "session {session_id}: starting in cwd={}",
-        config.default_cwd
-    );
-
-    // -------------------------------------------------------------------------
-    // 1. Build and spawn the Claude child process
-    // -------------------------------------------------------------------------
-    let mut cmd = Command::new(&config.claude_path);
-    cmd.args([
-        "--print",
-        "--verbose",
-        "--input-format",
-        "stream-json",
-        "--output-format",
-        "stream-json",
-        "--include-partial-messages",
-        "--dangerously-skip-permissions",
-    ]);
-
-    if config.is_resume {
-        cmd.args(["--resume", &config.claude_session_id]);
-    } else {
-        cmd.args(["--session-id", &config.claude_session_id]);
-    }
-
-    for arg in &config.extra_args {
-        cmd.arg(arg);
-    }
-    cmd.current_dir(&config.default_cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
         Err(e) => {
-            warn!("session {session_id}: failed to spawn claude: {e}");
-            ws_send(
-                &ws_tx,
-                &C2S::SessionEnded {
-                    session_id: session_id.clone(),
-                    exit_code: -1,
-                    stats: SessionStats::default(),
-                },
-            )
-            .await;
+            tracing::error!(
+                "session {}: failed to load VM config — refusing to run on host: {e}",
+                config.session_id,
+            );
+            abort_session(&ws_tx, config.session_id).await;
             return;
         }
     };
 
-    // -------------------------------------------------------------------------
-    // 2. Extract pid and I/O handles
-    // -------------------------------------------------------------------------
-    let pid = match child.id() {
-        Some(p) => p,
-        None => {
-            warn!("session {session_id}: could not get child PID");
-            0
-        }
-    };
+    crate::vm::run_vm_session(config, ws_tx, cmd_rx, vm_cfg).await;
+}
 
-    let stdin_pipe = child.stdin.take().expect("stdin was piped");
-    let stdout_pipe = child.stdout.take().expect("stdout was piped");
-    let stderr_pipe = child.stderr.take().expect("stderr was piped");
-
-    // -------------------------------------------------------------------------
-    // 3. Report SessionStarted
-    // -------------------------------------------------------------------------
+async fn abort_session(ws_tx: &Arc<Mutex<WsSink>>, session_id: String) {
     ws_send(
-        &ws_tx,
-        &C2S::SessionStarted {
-            session_id: session_id.clone(),
-            pid,
-            cwd: config.default_cwd.clone(),
-        },
-    )
-    .await;
-
-    // -------------------------------------------------------------------------
-    // 4. Stdin task
-    //    The main loop forwards text to this channel; the task writes it to Claude.
-    // -------------------------------------------------------------------------
-    let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(32);
-
-    let initial_prompt = config.initial_prompt.clone();
-    let session_id_stdin = session_id.clone();
-    tokio::spawn(async move {
-        let mut stdin = stdin_pipe;
-
-        // Send the initial prompt first, if any
-        if let Some(prompt) = initial_prompt {
-            let line = format_user_message(&prompt);
-            debug!("session {session_id_stdin}: writing initial prompt to stdin");
-            if let Err(e) = stdin.write_all(line.as_bytes()).await {
-                warn!("session {session_id_stdin}: stdin write (initial prompt) error: {e}");
-                return;
-            }
-            if let Err(e) = stdin.flush().await {
-                warn!("session {session_id_stdin}: stdin flush error: {e}");
-                return;
-            }
-        }
-
-        // Forward subsequent messages from the channel
-        while let Some(text) = stdin_rx.recv().await {
-            let line = format_user_message(&text);
-            debug!("session {session_id_stdin}: writing user input to stdin");
-            if let Err(e) = stdin.write_all(line.as_bytes()).await {
-                warn!("session {session_id_stdin}: stdin write error: {e}");
-                break;
-            }
-            if let Err(e) = stdin.flush().await {
-                warn!("session {session_id_stdin}: stdin flush error: {e}");
-                break;
-            }
-        }
-        debug!("session {session_id_stdin}: stdin task exiting");
-    });
-
-    // -------------------------------------------------------------------------
-    // 5. Stderr task: log lines at debug level
-    // -------------------------------------------------------------------------
-    let session_id_stderr = session_id.clone();
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr_pipe).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            warn!("session {session_id_stderr} [stderr]: {line}");
-        }
-    });
-
-    // -------------------------------------------------------------------------
-    // 6. Stats accumulator
-    // -------------------------------------------------------------------------
-    let mut stats = SessionStats::default();
-
-    // -------------------------------------------------------------------------
-    // 7. Main select! loop: stdout lines vs incoming commands
-    // -------------------------------------------------------------------------
-    let mut stdout_lines = BufReader::new(stdout_pipe).lines();
-
-    loop {
-        tokio::select! {
-            biased;
-
-            // Incoming command from server
-            cmd = cmd_rx.recv() => {
-                match cmd {
-                    Some(S2C::SendInput { text, .. }) => {
-                        debug!("session {session_id}: received SendInput");
-                        if let Err(e) = stdin_tx.send(text).await {
-                            warn!("session {session_id}: could not forward input to stdin task: {e}");
-                        }
-                    }
-                    Some(S2C::SendInputWithFiles { text, files, .. }) => {
-                        debug!("session {session_id}: received SendInputWithFiles ({} file(s))", files.len());
-                        let formatted = format_user_message_with_files(&text, &files).await;
-                        if !formatted.is_empty() {
-                            if let Err(e) = stdin_tx.send(formatted).await {
-                                warn!("session {session_id}: could not forward files to stdin task: {e}");
-                            }
-                        }
-                    }
-                    Some(S2C::KillSession { .. }) => {
-                        info!("session {session_id}: KillSession received, killing child");
-                        if let Err(e) = child.kill().await {
-                            warn!("session {session_id}: kill error: {e}");
-                        }
-                        break;
-                    }
-                    Some(other) => {
-                        warn!("session {session_id}: unexpected command: {other:?}");
-                    }
-                    None => {
-                        // Channel closed — connection was dropped; kill child
-                        info!("session {session_id}: command channel closed, killing child");
-                        let _ = child.kill().await;
-                        break;
-                    }
-                }
-            }
-
-            // Output line from Claude
-            line_result = stdout_lines.next_line() => {
-                match line_result {
-                    Ok(Some(line)) => {
-                        if line.trim().is_empty() {
-                            continue;
-                        }
-                        match serde_json::from_str::<serde_json::Value>(&line) {
-                            Ok(event) => {
-                                update_stats(&mut stats, &event);
-                                ws_send(
-                                    &ws_tx,
-                                    &C2S::SessionEvent {
-                                        session_id: session_id.clone(),
-                                        event,
-                                    },
-                                )
-                                .await;
-                            }
-                            Err(e) => {
-                                warn!("session {session_id}: failed to parse stdout line as JSON: {e}\nline: {line}");
-                                // Forward raw as a text event so the server still sees it
-                                let raw_event = serde_json::json!({
-                                    "type": "raw_text",
-                                    "text": line,
-                                });
-                                ws_send(
-                                    &ws_tx,
-                                    &C2S::SessionEvent {
-                                        session_id: session_id.clone(),
-                                        event: raw_event,
-                                    },
-                                )
-                                .await;
-                            }
-                        }
-                    }
-                    Ok(None) => {
-                        // stdout EOF — Claude has exited
-                        info!("session {session_id}: stdout closed");
-                        break;
-                    }
-                    Err(e) => {
-                        warn!("session {session_id}: stdout read error: {e}");
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // 8. Wait for the child to fully exit and collect the exit code
-    // -------------------------------------------------------------------------
-    let exit_code = match child.wait().await {
-        Ok(status) => status.code().unwrap_or(-1),
-        Err(e) => {
-            warn!("session {session_id}: wait() error: {e}");
-            -1
-        }
-    };
-
-    info!("session {session_id}: exited with code {exit_code}");
-
-    // -------------------------------------------------------------------------
-    // 9. Send SessionEnded
-    // -------------------------------------------------------------------------
-    ws_send(
-        &ws_tx,
-        &C2S::SessionEnded {
-            session_id: session_id.clone(),
-            exit_code,
-            stats,
+        ws_tx,
+        &crate::protocol::C2S::SessionEnded {
+            session_id,
+            exit_code: 1,
+            stats: Default::default(),
         },
     )
     .await;
 }
+
 
 // -----------------------------------------------------------------------------
 // Helper: format a user message with attached files for Claude's stream-json
