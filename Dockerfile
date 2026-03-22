@@ -7,7 +7,7 @@ COPY dashboard/ .
 RUN npm run build
 
 # ── Stage 2: Build the Rust server ────────────────────────────────────────────
-FROM rust:1.82-slim AS server
+FROM rust:1.88-slim AS server
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 

@@ -21,6 +21,7 @@
         "react-dom": "^19",
         "react-router-dom": "^7",
         "shiki": "^1.29",
+        "immer": "^10",
         "zustand": "^5",
         "clsx": "^2",
         "streamdown": "^2.5.0",
