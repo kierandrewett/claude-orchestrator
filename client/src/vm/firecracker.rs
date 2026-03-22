@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use std::num::NonZeroU64;
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tracing::info;
 
@@ -209,10 +209,11 @@ impl FirecrackerVm {
 ///
 /// Waits until slirp4netns prints "network [N] configured" to stdout,
 /// indicating that `tap0` is up and the user-space NAT is running.
-/// Spawn slirp4netns targeting `fc_pid`'s network namespace.
-///
-/// Waits until slirp4netns prints "network [N] configured" to stdout,
-/// indicating that `tap0` is up and the user-space NAT is running.
+/// Spawn slirp4netns targeting `fc_pid`'s network namespace and wait for it
+/// to initialise. Rather than parsing stdout (unreliable across versions),
+/// we give it 500 ms then check whether the process is still alive:
+///  - still running  → successfully daemonised, tap0 is up
+///  - exited quickly → startup error; stderr is collected and reported
 async fn start_slirp4netns(fc_pid: u32) -> Result<Child> {
     info!("vm: starting slirp4netns for pid {fc_pid}");
 
@@ -224,42 +225,37 @@ async fn start_slirp4netns(fc_pid: u32) -> Result<Child> {
             &fc_pid.to_string(),
             "tap0",
         ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())   // capture stderr so we can report the actual error
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .context("spawn slirp4netns")?;
 
-    let stdout = slirp.stdout.take().expect("stdout was piped");
-    let mut stderr = slirp.stderr.take().expect("stderr was piped");
-    let mut stdout_lines = BufReader::new(stdout).lines();
+    // Give it time to initialise (or fail fast on a permission error).
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    // Wait for "network [N] configured" on stdout.
-    // If the process exits first (EOF), collect stderr for diagnostics.
-    let ready = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while let Ok(Some(line)) = stdout_lines.next_line().await {
-            if line.contains("configured") {
-                return true;
+    match slirp.try_wait().context("slirp4netns wait")? {
+        Some(status) => {
+            // Exited already — collect stderr and report the real error.
+            let mut err_output = String::new();
+            if let Some(mut stderr) = slirp.stderr.take() {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(200),
+                    tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut err_output),
+                )
+                .await;
+            }
+            let detail = err_output.trim();
+            if detail.is_empty() {
+                anyhow::bail!("slirp4netns exited immediately (exit {})", status);
+            } else {
+                anyhow::bail!("slirp4netns failed (exit {}): {detail}", status);
             }
         }
-        false // EOF — process exited without printing "configured"
-    })
-    .await
-    .unwrap_or(false);
-
-    if !ready {
-        // Collect whatever slirp4netns printed to stderr for the error message.
-        let mut err_output = String::new();
-        let _ = tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut err_output).await;
-        let _ = slirp.kill().await;
-
-        if err_output.trim().is_empty() {
-            anyhow::bail!("slirp4netns did not become ready (no output within 10s)");
-        } else {
-            anyhow::bail!("slirp4netns failed: {}", err_output.trim());
+        None => {
+            // Still running — startup succeeded, tap0 is configured.
+            info!("vm: slirp4netns running (tap0 up, NAT active)");
+            Ok(slirp)
         }
     }
-
-    info!("vm: slirp4netns ready (tap0 up, NAT active)");
-    Ok(slirp)
 }
