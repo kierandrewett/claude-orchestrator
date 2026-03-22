@@ -4,6 +4,7 @@ mod dashboard_api;
 mod ntfy;
 mod persist;
 mod protocol;
+mod provider;
 mod state;
 mod telegram;
 

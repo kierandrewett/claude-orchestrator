@@ -1,4 +1,4 @@
-//! Telegram bot provider.
+//! Telegram messaging provider.
 //!
 //! Starts when `TELEGRAM_BOT_TOKEN` is set. Each Telegram chat gets one Claude
 //! session that lives for up to 12 hours. After that, the next message creates
@@ -11,7 +11,7 @@
 //!   /new     — force a new session immediately
 //!
 //! All other text is forwarded to the current Claude session. Slash commands
-//! prefixed with `/` that aren't recognized bot commands are passed through to
+//! prefixed with `/` that aren't recognised bot commands are passed through to
 //! Claude (e.g. `/compact`, `/help`).
 
 use std::{
@@ -20,35 +20,33 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
 
+use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use chrono::Utc;
 use teloxide::{
     net::Download,
     prelude::*,
     types::{MessageId, ParseMode, ReactionType, ReplyParameters},
     utils::command::BotCommands,
 };
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::RwLock;
 use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
-    protocol::{AttachedFile, SessionInfo, SessionStats, SessionStatus, S2C, S2D},
-    state::{AppState, SessionBuffer},
+    protocol::{AttachedFile, SessionStatus, S2C},
+    provider::{self, ConversationSession, MessagingProvider, Responder, ToolEntry},
+    state::AppState,
 };
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-/// How long a Claude session lives before a new one is created.
-const SESSION_LIFETIME: Duration = Duration::from_secs(12 * 60 * 60);
-
-/// How long to wait for Claude to respond before giving up.
-const RESPONSE_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long a Telegram chat session lives before a new one is created.
+const SESSION_LIFETIME: std::time::Duration = std::time::Duration::from_secs(12 * 60 * 60);
 
 /// Telegram's message character limit. Reduced from 4096 to leave headroom for
 /// HTML tags added by md_to_html.
@@ -78,82 +76,111 @@ enum Cmd {
 // ---------------------------------------------------------------------------
 
 struct ChatState {
-    session_id: String,
+    /// Provider-agnostic session tracking.
+    inner: ConversationSession,
     /// If set, bot replies are threaded to this Telegram message (used for /task).
     task_reply_to: Option<MessageId>,
-    created_at: Instant,
-    /// True while a collect_and_send task is active for this session.
-    /// Prevents spawning duplicate collectors when messages arrive mid-response.
-    collector_running: Arc<AtomicBool>,
 }
 
 impl ChatState {
     fn new(session_id: String, task_reply_to: Option<MessageId>) -> Self {
         Self {
-            session_id,
+            inner: ConversationSession::new(session_id),
             task_reply_to,
-            created_at: Instant::now(),
-            collector_running: Arc::new(AtomicBool::new(false)),
         }
     }
 
+    fn session_id(&self) -> &str {
+        &self.inner.session_id
+    }
+
     fn is_expired(&self) -> bool {
-        self.created_at.elapsed() > SESSION_LIFETIME
+        self.inner.is_expired(SESSION_LIFETIME)
+    }
+
+    fn collector_running(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.inner.collector_running)
     }
 }
 
 type ChatStates = Arc<RwLock<HashMap<i64, ChatState>>>;
 
 // ---------------------------------------------------------------------------
-// Entry point
+// Public entry point (used by main.rs)
+// ---------------------------------------------------------------------------
+
+/// Starts the Telegram bot. Called by `main` when `TELEGRAM_BOT_TOKEN` is set.
+pub async fn start(app_state: Arc<AppState>, token: String) {
+    TelegramProvider::new(token).start(app_state).await;
+}
+
+// ---------------------------------------------------------------------------
+// TelegramProvider
 // ---------------------------------------------------------------------------
 
 /// Set of allowed Telegram user IDs. Empty means allow everyone.
 type AllowedUsers = Arc<HashSet<u64>>;
 
-pub async fn start(app_state: Arc<AppState>, token: String) {
-    info!("telegram: starting bot");
-    let bot = Bot::new(token);
+/// Telegram messaging provider. Constructed by `main` when `TELEGRAM_BOT_TOKEN`
+/// is set and started via the [`MessagingProvider`] trait.
+pub struct TelegramProvider {
+    token: String,
+}
 
-    // Parse TELEGRAM_ALLOWED_USERS="123456789,987654321"
-    let allowed: AllowedUsers = Arc::new(
-        std::env::var("TELEGRAM_ALLOWED_USERS")
-            .unwrap_or_default()
-            .split(',')
-            .filter_map(|s| s.trim().parse::<u64>().ok())
-            .collect(),
-    );
+impl TelegramProvider {
+    pub fn new(token: String) -> Self {
+        Self { token }
+    }
+}
 
-    if allowed.is_empty() {
-        warn!("telegram: TELEGRAM_ALLOWED_USERS is not set — bot is open to everyone");
-    } else {
-        info!("telegram: allowlist has {} user(s)", allowed.len());
+#[async_trait]
+impl MessagingProvider for TelegramProvider {
+    fn name(&self) -> &str {
+        "telegram"
     }
 
-    if let Err(e) = bot.set_my_commands(Cmd::bot_commands()).await {
-        warn!("telegram: failed to register commands: {e}");
+    async fn start(&self, app_state: Arc<AppState>) {
+        info!("telegram: starting bot");
+        let bot = Bot::new(self.token.clone());
+
+        let allowed: AllowedUsers = Arc::new(
+            std::env::var("TELEGRAM_ALLOWED_USERS")
+                .unwrap_or_default()
+                .split(',')
+                .filter_map(|s| s.trim().parse::<u64>().ok())
+                .collect(),
+        );
+
+        if allowed.is_empty() {
+            warn!("telegram: TELEGRAM_ALLOWED_USERS is not set — bot is open to everyone");
+        } else {
+            info!("telegram: allowlist has {} user(s)", allowed.len());
+        }
+
+        if let Err(e) = bot.set_my_commands(Cmd::bot_commands()).await {
+            warn!("telegram: failed to register commands: {e}");
+        }
+
+        let states: ChatStates = Arc::new(RwLock::new(HashMap::new()));
+
+        let handler = Update::filter_message()
+            .filter(|msg: Message, allowed: AllowedUsers| {
+                let uid = msg.from().map(|u| u.id.0).unwrap_or(0);
+                allowed.is_empty() || allowed.contains(&uid)
+            })
+            .branch(
+                dptree::entry()
+                    .filter_command::<Cmd>()
+                    .endpoint(handle_command),
+            )
+            .branch(dptree::endpoint(handle_message));
+
+        Dispatcher::builder(bot, handler)
+            .dependencies(dptree::deps![app_state, states, allowed])
+            .build()
+            .dispatch()
+            .await;
     }
-
-    let states: ChatStates = Arc::new(RwLock::new(HashMap::new()));
-
-    let handler = Update::filter_message()
-        .filter(|msg: Message, allowed: AllowedUsers| {
-            // Pass through if allowlist is empty OR user ID is in it
-            let uid = msg.from().map(|u| u.id.0).unwrap_or(0);
-            allowed.is_empty() || allowed.contains(&uid)
-        })
-        .branch(
-            dptree::entry()
-                .filter_command::<Cmd>()
-                .endpoint(handle_command),
-        )
-        .branch(dptree::endpoint(handle_message));
-
-    Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![app_state, states, allowed])
-        .build()
-        .dispatch()
-        .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -191,13 +218,15 @@ async fn handle_command(
             // Subscribe before creating the session so we don't miss events.
             let sse_rx = app_state.sse_tx.subscribe();
 
-            let session_id = create_session(&app_state, chat_id.0, Some(prompt)).await;
+            let name = Some(format!("Telegram {}", chat_id.0));
+            let session_id =
+                provider::create_session(&app_state, name, Some(prompt)).await;
             let task_reply_to = msg.id;
 
             let collector_flag = {
                 let mut guard = states.write().await;
                 let state = ChatState::new(session_id.clone(), Some(task_reply_to));
-                let flag = state.collector_running.clone();
+                let flag = state.collector_running();
                 flag.store(true, Ordering::Relaxed);
                 guard.insert(chat_id.0, state);
                 flag
@@ -207,10 +236,9 @@ async fn handle_command(
                 .send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
                 .await;
 
-            // Acknowledge receipt with eyes reaction.
             set_reaction(&bot, chat_id, msg.id, "👀").await;
 
-            tokio::spawn(collect_and_send(
+            spawn_collector(
                 bot,
                 chat_id,
                 Some(task_reply_to),
@@ -218,15 +246,15 @@ async fn handle_command(
                 session_id,
                 sse_rx,
                 collector_flag,
-            ));
+            );
         }
 
         Cmd::Status => {
             let guard = states.read().await;
             if let Some(state) = guard.get(&chat_id.0).filter(|s| !s.is_expired()) {
                 let sessions = app_state.sessions.read().await;
-                if let Some(buf) = sessions.get(&state.session_id) {
-                    let age = state.created_at.elapsed();
+                if let Some(buf) = sessions.get(state.session_id()) {
+                    let age = state.inner.created_at.elapsed();
                     let remaining = SESSION_LIFETIME.as_secs().saturating_sub(age.as_secs());
                     let status_str = format!("{:?}", buf.info.status).to_lowercase();
                     let stats = &buf.info.stats;
@@ -234,7 +262,7 @@ async fn handle_command(
                         chat_id,
                         format!(
                             "📊 <b>Session status</b>\nID: <code>{}</code>\nStatus: {}\nAge: {}h {}m\nExpires in: {}h {}m\nTokens: {}↑ {}↓\nCost: ${:.4}",
-                            &state.session_id[..8],
+                            &state.session_id()[..8],
                             status_str,
                             age.as_secs() / 3600,
                             (age.as_secs() % 3600) / 60,
@@ -326,12 +354,14 @@ async fn handle_message(
         guard
             .get(&chat_id.0)
             .filter(|s| !s.is_expired())
-            .map(|s| (Some(s.session_id.clone()), s.task_reply_to))
+            .map(|s| (Some(s.session_id().to_string()), s.task_reply_to))
             .unwrap_or((None, None))
     };
 
     // reply_to: prefer the /task thread anchor, then a slash-command reply, else None.
     let reply_to = task_reply_to.or(slash_reply);
+
+    let name = Some(format!("Telegram {}", chat_id.0));
 
     let (session_id, collector_flag) = if let Some(id) = session_id {
         // If the session never started or has ended (killed/failed/completed),
@@ -355,10 +385,8 @@ async fn handle_message(
         if is_dead {
             warn!("telegram: session {id} is dead, creating fresh session");
             states.write().await.remove(&chat_id.0);
-            // When there are files, start without an initial_prompt so we can
-            // send a multimodal SendInputWithFiles message right after.
             let initial = if files.is_empty() { Some(text.clone()) } else { None };
-            let new_id = create_session(&app_state, chat_id.0, initial).await;
+            let new_id = provider::create_session(&app_state, name, initial).await;
             if !files.is_empty() {
                 app_state
                     .send_to_client(&S2C::SendInputWithFiles {
@@ -371,19 +399,19 @@ async fn handle_message(
             let flag = {
                 let mut guard = states.write().await;
                 let state = ChatState::new(new_id.clone(), None);
-                let flag = state.collector_running.clone();
+                let flag = state.collector_running();
                 flag.store(true, Ordering::Relaxed);
                 guard.insert(chat_id.0, state);
                 flag
             };
             (new_id, flag)
         } else {
-            // Session is alive. Check if a collector is already running.
+            // Session is alive — check if a collector is already running.
             let (flag, already_running) = {
                 let guard = states.read().await;
                 let flag = guard
                     .get(&chat_id.0)
-                    .map(|s| s.collector_running.clone())
+                    .map(|s| s.collector_running())
                     .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
                 let already = flag.load(Ordering::Relaxed);
                 (flag, already)
@@ -407,8 +435,6 @@ async fn handle_message(
             }
 
             if already_running {
-                // A collector is already active for this session — it will pick up
-                // the next result event. Don't spawn a duplicate.
                 info!("telegram: collector already active for session {id}, skipping spawn");
                 return Ok(());
             }
@@ -418,10 +444,8 @@ async fn handle_message(
         }
     } else {
         // No active session — create one.
-        // When there are files, start without an initial_prompt so the multimodal
-        // content can be sent via SendInputWithFiles immediately after.
         let initial = if files.is_empty() { Some(text.clone()) } else { None };
-        let id = create_session(&app_state, chat_id.0, initial).await;
+        let id = provider::create_session(&app_state, name, initial).await;
         if !files.is_empty() {
             app_state
                 .send_to_client(&S2C::SendInputWithFiles {
@@ -434,7 +458,7 @@ async fn handle_message(
         let flag = {
             let mut guard = states.write().await;
             let state = ChatState::new(id.clone(), None);
-            let flag = state.collector_running.clone();
+            let flag = state.collector_running();
             flag.store(true, Ordering::Relaxed);
             guard.insert(chat_id.0, state);
             flag
@@ -446,81 +470,13 @@ async fn handle_message(
         .send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
         .await;
 
-    // Acknowledge receipt with eyes reaction.
     set_reaction(&bot, chat_id, msg.id, "👀").await;
 
-    tokio::spawn(collect_and_send(
-        bot,
-        chat_id,
-        reply_to,
-        msg.id,
-        session_id,
-        sse_rx,
-        collector_flag,
-    ));
+    spawn_collector(bot, chat_id, reply_to, msg.id, session_id, sse_rx, collector_flag);
 
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Session creation helper
-// ---------------------------------------------------------------------------
-
-async fn create_session(
-    app_state: &Arc<AppState>,
-    chat_id: i64,
-    initial_prompt: Option<String>,
-) -> String {
-    let session_id = Uuid::new_v4().to_string();
-    let claude_session_id = Uuid::new_v4().to_string();
-
-    let hostname = {
-        let guard = app_state.client.read().await;
-        guard.as_ref().map(|c| c.hostname.clone())
-    };
-
-    let info = SessionInfo {
-        id: session_id.clone(),
-        name: Some(format!("Telegram {chat_id}")),
-        cwd: String::new(),
-        status: SessionStatus::Pending,
-        created_at: Utc::now(),
-        started_at: None,
-        ended_at: None,
-        stats: SessionStats::default(),
-        client_hostname: hostname,
-        claude_session_id: Some(claude_session_id.clone()),
-    };
-
-    app_state.store.save_session(&info).await.ok();
-
-    {
-        let mut guard = app_state.sessions.write().await;
-        guard.insert(
-            session_id.clone(),
-            SessionBuffer {
-                info: info.clone(),
-                events: std::collections::VecDeque::new(),
-            },
-        );
-    }
-
-    app_state
-        .broadcast(&S2D::SessionCreated { session: info })
-        .await;
-
-    app_state
-        .send_to_client(&S2C::StartSession {
-            session_id: session_id.clone(),
-            initial_prompt,
-            extra_args: Vec::new(),
-            claude_session_id,
-            is_resume: false,
-        })
-        .await;
-
-    session_id
-}
 
 // ---------------------------------------------------------------------------
 // Stop / kill helper
@@ -538,7 +494,7 @@ async fn kill_current_session(
         guard
             .get(&chat_id.0)
             .filter(|s| !s.is_expired())
-            .map(|s| s.session_id.clone())
+            .map(|s| s.session_id().to_string())
     };
 
     if let Some(id) = session_id {
@@ -573,228 +529,129 @@ async fn kill_current_session(
 }
 
 // ---------------------------------------------------------------------------
-// Response collector
+// TelegramResponder — implements provider::Responder for Telegram
 // ---------------------------------------------------------------------------
 
-/// Subscribes to the broadcast channel, accumulates Claude's text response for
-/// `session_id`, then sends it to Telegram (optionally as a reply).
+/// Telegram-specific [`Responder`] implementation.
 ///
-/// While Claude is working, tool calls are displayed as a live-edited status
-/// message. When the final text response arrives it is sent as a new message.
-///
-/// Reactions on `user_msg_id`:
-///   👀  (set before spawning in the handler) — message received
-///   🏗   — first tool call started
-///   ✅  — response complete
-async fn collect_and_send(
+/// Holds the bot handle and per-message context needed to deliver reactions,
+/// the live tool-status message, and the final response text.
+struct TelegramResponder {
+    bot: Bot,
+    chat_id: ChatId,
+    user_msg_id: MessageId,
+    reply_to: Option<MessageId>,
+    /// The Telegram message used to show live tool status (created lazily).
+    status_msg_id: tokio::sync::Mutex<Option<MessageId>>,
+}
+
+impl TelegramResponder {
+    fn new(
+        bot: Bot,
+        chat_id: ChatId,
+        user_msg_id: MessageId,
+        reply_to: Option<MessageId>,
+    ) -> Self {
+        Self {
+            bot,
+            chat_id,
+            user_msg_id,
+            reply_to,
+            status_msg_id: tokio::sync::Mutex::new(None),
+        }
+    }
+}
+
+#[async_trait]
+impl Responder for TelegramResponder {
+    async fn on_working(&self) {
+        set_reaction(&self.bot, self.chat_id, self.user_msg_id, "🏗").await;
+    }
+
+    async fn update_tool_status(
+        &self,
+        tools: &[ToolEntry],
+        current: Option<&ToolEntry>,
+        session_start: Instant,
+        done: bool,
+    ) {
+        let mut guard = self.status_msg_id.lock().await;
+        *guard = send_or_edit_tool_status(
+            &self.bot,
+            self.chat_id,
+            self.reply_to,
+            tools,
+            current,
+            session_start,
+            *guard,
+            done,
+        )
+        .await;
+    }
+
+    async fn send_text(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        for chunk in split_message(text) {
+            let html = md_to_html(&chunk);
+            let mut req = self
+                .bot
+                .send_message(self.chat_id, &html)
+                .parse_mode(ParseMode::Html);
+            if let Some(rid) = self.reply_to {
+                req = req.reply_parameters(ReplyParameters::new(rid));
+            }
+            if let Err(e) = req.await {
+                warn!("telegram: failed to send message: {e}");
+            }
+        }
+    }
+
+    async fn on_done(&self) {
+        set_reaction(&self.bot, self.chat_id, self.user_msg_id, "✅").await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Collector spawn helper
+// ---------------------------------------------------------------------------
+
+/// Spawns a task that runs [`provider::collect_and_respond`] with a
+/// [`TelegramResponder`], then clears `collector_flag` when done.
+fn spawn_collector(
     bot: Bot,
     chat_id: ChatId,
     reply_to: Option<MessageId>,
     user_msg_id: MessageId,
     session_id: String,
-    mut sse_rx: broadcast::Receiver<String>,
+    sse_rx: tokio::sync::broadcast::Receiver<String>,
     collector_flag: Arc<AtomicBool>,
 ) {
-    info!("telegram: collect_and_send waiting for response on session {session_id}");
-    let deadline = tokio::time::Instant::now() + RESPONSE_TIMEOUT;
-
-    // Accumulated final text response.
-    let mut text = String::new();
-
-    // Live tool-call tracking.
-    // Each entry is (tool_name, partial_input_json).
-    let mut completed_tools: Vec<(String, String)> = Vec::new();
-    // The tool currently being streamed.
-    let mut current_tool: Option<(String, String)> = None;
-    // The Telegram message used to show live tool status (created on first tool call).
-    let mut status_msg_id: Option<MessageId> = None;
-    // Whether we've already switched to the 🏗 reaction.
-    let mut building_reaction_set = false;
-
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            warn!("telegram: response timeout for session {session_id}");
-            break;
-        }
-
-        match tokio::time::timeout(remaining, sse_rx.recv()).await {
-            Ok(Ok(raw)) => {
-                let Ok(s2d) = serde_json::from_str::<S2D>(&raw) else {
-                    continue;
-                };
-                match s2d {
-                    S2D::SessionEvent {
-                        session_id: sid,
-                        event,
-                    } if sid == session_id => {
-                        let evt_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
-
-                        match evt_type {
-                            // Streaming events are wrapped in stream_event — unwrap and
-                            // extract text deltas and tool call info from inner events.
-                            "stream_event" => {
-                                if let Some(inner) = event.get("event") {
-                                    let inner_type =
-                                        inner.get("type").and_then(|t| t.as_str()).unwrap_or("");
-
-                                    match inner_type {
-                                        "content_block_start" => {
-                                            // Detect start of a tool_use block.
-                                            if inner
-                                                .pointer("/content_block/type")
-                                                .and_then(|t| t.as_str())
-                                                == Some("tool_use")
-                                            {
-                                                let name = inner
-                                                    .pointer("/content_block/name")
-                                                    .and_then(|n| n.as_str())
-                                                    .unwrap_or("unknown")
-                                                    .to_string();
-                                                current_tool = Some((name, String::new()));
-
-                                                // Switch reaction to 🏗 on first tool call.
-                                                if !building_reaction_set {
-                                                    set_reaction(
-                                                        &bot,
-                                                        chat_id,
-                                                        user_msg_id,
-                                                        "🏗",
-                                                    )
-                                                    .await;
-                                                    building_reaction_set = true;
-                                                }
-                                            }
-                                        }
-                                        "content_block_delta" => {
-                                            // Text delta → accumulate response text.
-                                            if let Some(t) = inner
-                                                .pointer("/delta/text")
-                                                .and_then(|t| t.as_str())
-                                            {
-                                                text.push_str(t);
-                                            }
-                                            // Input JSON delta → accumulate tool input.
-                                            if let Some(partial) = inner
-                                                .pointer("/delta/partial_json")
-                                                .and_then(|t| t.as_str())
-                                            {
-                                                if let Some((_, ref mut input)) = current_tool {
-                                                    input.push_str(partial);
-                                                }
-                                            }
-                                        }
-                                        "content_block_stop" => {
-                                            // Finalise current tool call and update status.
-                                            if let Some(tool) = current_tool.take() {
-                                                completed_tools.push(tool);
-                                                status_msg_id = update_tool_status(
-                                                    &bot,
-                                                    chat_id,
-                                                    reply_to,
-                                                    &completed_tools,
-                                                    status_msg_id,
-                                                    false,
-                                                )
-                                                .await;
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                            // result marks the end of the entire Claude turn (incl. all tool use).
-                            "result" => {
-                                info!(
-                                    "telegram: session {session_id} result, sending {} chars",
-                                    text.len()
-                                );
-                                // Mark the tool status message as done.
-                                if status_msg_id.is_some() && !completed_tools.is_empty() {
-                                    update_tool_status(
-                                        &bot,
-                                        chat_id,
-                                        reply_to,
-                                        &completed_tools,
-                                        status_msg_id,
-                                        true,
-                                    )
-                                    .await;
-                                }
-                                break;
-                            }
-                            _ => {}
-                        }
-                    }
-                    S2D::SessionEnded {
-                        session_id: sid, ..
-                    } if sid == session_id => {
-                        info!(
-                            "telegram: session {session_id} ended, sending {} chars",
-                            text.len()
-                        );
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-            Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
-                warn!("telegram: collect_and_send lagged by {n} messages for session {session_id}");
-                continue;
-            }
-            Ok(Err(broadcast::error::RecvError::Closed)) => {
-                warn!("telegram: broadcast channel closed for session {session_id}");
-                break;
-            }
-            Err(_) => {
-                warn!("telegram: timeout waiting for session {session_id}");
-                break;
-            }
-        }
-    }
-
-    // Release the collector slot so the next message can spawn a new collector.
-    collector_flag.store(false, Ordering::Relaxed);
-
-    // React ✅ to signal completion.
-    set_reaction(&bot, chat_id, user_msg_id, "✅").await;
-
-    if text.is_empty() {
-        info!("telegram: no text to send for session {session_id}");
-        return;
-    }
-
-    for chunk in split_message(&text) {
-        let html = md_to_html(&chunk);
-        let mut req = bot
-            .send_message(chat_id, &html)
-            .parse_mode(ParseMode::Html);
-        if let Some(rid) = reply_to {
-            req = req.reply_parameters(ReplyParameters::new(rid));
-        }
-        if let Err(e) = req.await {
-            warn!("telegram: failed to send message: {e}");
-        }
-    }
+    let responder = Arc::new(TelegramResponder::new(bot, chat_id, user_msg_id, reply_to));
+    tokio::spawn(async move {
+        provider::collect_and_respond(session_id, sse_rx, &*responder).await;
+        collector_flag.store(false, Ordering::Relaxed);
+    });
 }
 
 // ---------------------------------------------------------------------------
-// Tool-status message helpers
+// Tool-status Telegram message helpers
 // ---------------------------------------------------------------------------
 
-/// Sends or edits the live tool-status message.
-///
-/// Returns the `MessageId` of the status message so the caller can pass it
-/// back on the next call for editing.
-async fn update_tool_status(
+/// Sends a new tool-status message or edits the existing one.
+/// Returns the `MessageId` of the (possibly new) message.
+async fn send_or_edit_tool_status(
     bot: &Bot,
     chat_id: ChatId,
     reply_to: Option<MessageId>,
-    tools: &[(String, String)],
+    tools: &[ToolEntry],
+    current: Option<&ToolEntry>,
+    session_start: Instant,
     existing_id: Option<MessageId>,
     done: bool,
 ) -> Option<MessageId> {
-    let body = format_tool_status(tools, done);
+    let body = format_tool_status(tools, current, session_start, done);
 
     if let Some(mid) = existing_id {
         match bot
@@ -810,7 +667,6 @@ async fn update_tool_status(
         }
     }
 
-    // No existing message — send a new one.
     let mut req = bot
         .send_message(chat_id, &body)
         .parse_mode(ParseMode::Html);
@@ -826,31 +682,74 @@ async fn update_tool_status(
     }
 }
 
-/// Formats the list of completed tool calls as HTML.
+/// Formats the list of completed (and optionally in-progress) tool calls as HTML.
 ///
-/// Each tool shows a brief summary (always visible) plus the full input in a
-/// `<tg-spoiler>` block that the user can tap to reveal.
-fn format_tool_status(tools: &[(String, String)], done: bool) -> String {
+/// Each completed tool shows elapsed duration plus a spoiler with full input.
+/// The current in-progress tool (if any) is shown at the bottom with a spinner.
+fn format_tool_status(
+    tools: &[ToolEntry],
+    current: Option<&ToolEntry>,
+    session_start: Instant,
+    done: bool,
+) -> String {
+    let total_secs = session_start.elapsed().as_secs();
     let icon = if done { "✅" } else { "⚙️" };
-    let mut lines = vec![format!("{icon} <b>Tool calls</b>")];
-    for (name, input) in tools {
-        let summary = summarise_tool_input(input);
-        let full_html = full_tool_input_html(input);
+    let mut lines = vec![format!(
+        "{icon} <b>Tool calls</b> • {}",
+        fmt_duration(total_secs)
+    )];
+
+    for entry in tools {
+        let secs = entry.elapsed_secs();
+        let summary = summarise_tool_input(&entry.input);
+        let full_html = full_tool_input_html(&entry.input);
+        let time = fmt_duration(secs);
 
         let line = if summary.is_empty() {
-            format!("• <b>{}</b>", escape_html(name))
+            format!("• <b>{}</b> ({})", escape_html(&entry.name), time)
         } else if full_html.len() > escape_html(&summary).len() + 10 {
-            // Has meaningful extra detail — show summary + spoiler with full input.
             format!(
-                "• <b>{name}</b> — <code>{}</code> <tg-spoiler>{full_html}</tg-spoiler>",
+                "• <b>{}</b> — <code>{}</code> ({time}) <tg-spoiler>{full_html}</tg-spoiler>",
+                escape_html(&entry.name),
                 escape_html(&summary),
             )
         } else {
-            format!("• <b>{name}</b> — <code>{}</code>", escape_html(&summary))
+            format!(
+                "• <b>{}</b> — <code>{}</code> ({})",
+                escape_html(&entry.name),
+                escape_html(&summary),
+                time
+            )
         };
         lines.push(line);
     }
+
+    if let Some(entry) = current {
+        let secs = entry.elapsed_secs();
+        let summary = summarise_tool_input(&entry.input);
+        let time = fmt_duration(secs);
+        let line = if summary.is_empty() {
+            format!("• ⏳ <b>{}</b> ({}…)", escape_html(&entry.name), time)
+        } else {
+            format!(
+                "• ⏳ <b>{}</b> — <code>{}</code> ({}…)",
+                escape_html(&entry.name),
+                escape_html(&summary),
+                time
+            )
+        };
+        lines.push(line);
+    }
+
     lines.join("\n")
+}
+
+fn fmt_duration(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m {}s", secs / 60, secs % 60)
+    }
 }
 
 /// Returns a short human-readable summary of a (possibly partial) JSON input string.
