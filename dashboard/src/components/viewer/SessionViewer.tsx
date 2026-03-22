@@ -48,6 +48,7 @@ export function SessionViewer() {
         session.name || session.cwd.split('/').filter(Boolean).pop() || session.id.slice(0, 8);
 
     const isRunning = session.status === 'running';
+    const isPending = session.status === 'pending';
 
     const handleKill = () => {
         if (window.confirm(`Kill session "${displayName}"?`)) {
@@ -118,8 +119,10 @@ export function SessionViewer() {
             {/* Event stream — takes remaining height */}
             <EventStream events={events} />
 
-            {/* Input bar — only when running */}
-            {isRunning && <InputBar sessionId={session.id} onKill={handleKill} />}
+            {/* Input bar — shown while pending or running */}
+            {(isPending || isRunning) && (
+                <InputBar sessionId={session.id} onKill={handleKill} pending={isPending} />
+            )}
         </div>
     );
 }

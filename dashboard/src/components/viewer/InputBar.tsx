@@ -7,9 +7,10 @@ import type { SlashCommand } from '../../types';
 interface Props {
     sessionId: string;
     onKill: () => void;
+    pending?: boolean;
 }
 
-export function InputBar({ sessionId, onKill }: Props) {
+export function InputBar({ sessionId, onKill, pending = false }: Props) {
     const { sendInput } = useSessionsStore();
     const commands = useCommands();
     const [text, setText] = useState('');
@@ -144,7 +145,7 @@ export function InputBar({ sessionId, onKill }: Props) {
                     value={text}
                     onChange={e => setText(e.target.value)}
                     onKeyDown={handleKeyDown}
-                    placeholder="Message Claude… (/ for commands, Enter to send)"
+                    placeholder={pending ? 'Starting session…' : 'Message Claude… (/ for commands, Enter to send)'}
                     rows={1}
                     className="flex-1 bg-zinc-800/80 border border-zinc-700 rounded-lg px-3 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-600 resize-none font-mono leading-relaxed transition-colors"
                     style={{ minHeight: '42px', maxHeight: '160px' }}
@@ -164,7 +165,7 @@ export function InputBar({ sessionId, onKill }: Props) {
                     </button>
                     <button
                         onClick={send}
-                        disabled={!text.trim()}
+                        disabled={!text.trim() || pending}
                         className="p-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white rounded-lg transition-colors"
                         title="Send (Enter)"
                     >

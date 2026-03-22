@@ -25,6 +25,7 @@ pub struct Tray {
     restart_item:   MenuItem,
     quit_item:      MenuItem,
     last_count:     usize,
+    last_connected: bool,
 }
 
 impl Tray {
@@ -32,7 +33,7 @@ impl Tray {
         #[cfg(target_os = "linux")]
         gtk::init()?;
 
-        let icon = make_icon(0);
+        let icon = make_icon(0, false);
 
         let state_item    = MenuItem::new("Disconnected", false, None);
         let sessions_item = MenuItem::new("No active sessions", false, None);
@@ -71,6 +72,7 @@ impl Tray {
             restart_item,
             quit_item,
             last_count: 0,
+            last_connected: false,
         })
     }
 
@@ -91,10 +93,11 @@ impl Tray {
         };
         let _ = self.sessions_item.set_text(&sessions_text);
 
-        // Update icon badge only when count changes
-        if state.active_sessions != self.last_count {
+        // Update icon when count or connection state changes
+        if state.active_sessions != self.last_count || state.connected != self.last_connected {
             self.last_count = state.active_sessions;
-            let _ = self.icon.set_icon(Some(make_icon(state.active_sessions)));
+            self.last_connected = state.connected;
+            let _ = self.icon.set_icon(Some(make_icon(state.active_sessions, state.connected)));
         }
     }
 
@@ -105,15 +108,33 @@ impl Tray {
 
 // ── Icon rendering ────────────────────────────────────────────────────────────
 
-/// Build the tray icon, optionally overlaying a session-count badge.
-fn make_icon(count: usize) -> Icon {
+/// Build the tray icon, optionally greyscaled and/or with a session-count badge.
+fn make_icon(count: usize, connected: bool) -> Icon {
     let mut rgba = ICON_RGBA.to_vec();
+
+    if !connected {
+        greyscale(&mut rgba);
+    }
 
     if count > 0 {
         draw_badge(&mut rgba, ICON_SIZE, ICON_SIZE, count);
     }
 
     Icon::from_rgba(rgba, ICON_SIZE, ICON_SIZE).expect("valid icon")
+}
+
+/// Desaturate all pixels to greyscale (luminance-weighted).
+fn greyscale(pixels: &mut Vec<u8>) {
+    for chunk in pixels.chunks_exact_mut(4) {
+        let r = chunk[0] as f32;
+        let g = chunk[1] as f32;
+        let b = chunk[2] as f32;
+        let luma = (0.299 * r + 0.587 * g + 0.114 * b) as u8;
+        chunk[0] = luma;
+        chunk[1] = luma;
+        chunk[2] = luma;
+        // alpha unchanged
+    }
 }
 
 /// Draw a red pill badge with a digit (or "9+") in the bottom-right corner.
