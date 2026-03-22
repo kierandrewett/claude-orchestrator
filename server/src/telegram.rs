@@ -415,12 +415,14 @@ async fn collect_and_send(
     session_id: String,
     mut sse_rx: broadcast::Receiver<String>,
 ) {
+    info!("telegram: collect_and_send waiting for response on session {session_id}");
     let deadline = tokio::time::Instant::now() + RESPONSE_TIMEOUT;
     let mut text = String::new();
 
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
+            warn!("telegram: response timeout for session {session_id}");
             break;
         }
 
@@ -436,6 +438,7 @@ async fn collect_and_send(
                     } if sid == session_id => {
                         let evt_type =
                             event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        info!("telegram: session {session_id} event type={evt_type}");
 
                         match evt_type {
                             "content_block_delta" => {
@@ -445,7 +448,10 @@ async fn collect_and_send(
                                     text.push_str(delta);
                                 }
                             }
-                            "message_stop" | "result" => break,
+                            "message_stop" | "result" => {
+                                info!("telegram: session {session_id} got {evt_type}, sending {} chars", text.len());
+                                break;
+                            }
                             // Turn-complete format: extract text from content array
                             "assistant" => {
                                 if let Some(content) =
@@ -465,6 +471,7 @@ async fn collect_and_send(
                                         }
                                     }
                                 }
+                                info!("telegram: session {session_id} got assistant turn-complete, sending {} chars", text.len());
                                 break;
                             }
                             _ => {}
@@ -472,16 +479,30 @@ async fn collect_and_send(
                     }
                     S2D::SessionEnded {
                         session_id: sid, ..
-                    } if sid == session_id => break,
+                    } if sid == session_id => {
+                        info!("telegram: session {session_id} ended, sending {} chars", text.len());
+                        break;
+                    }
                     _ => {}
                 }
             }
-            Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
-            Ok(Err(broadcast::error::RecvError::Closed)) | Err(_) => break,
+            Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
+                warn!("telegram: collect_and_send lagged by {n} messages for session {session_id}");
+                continue;
+            }
+            Ok(Err(broadcast::error::RecvError::Closed)) => {
+                warn!("telegram: broadcast channel closed for session {session_id}");
+                break;
+            }
+            Err(_) => {
+                warn!("telegram: timeout waiting for session {session_id}");
+                break;
+            }
         }
     }
 
     if text.is_empty() {
+        info!("telegram: no text to send for session {session_id}");
         return;
     }
 
