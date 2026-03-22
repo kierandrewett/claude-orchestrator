@@ -183,12 +183,32 @@ export function EventRow({ turn }: { turn: ConversationTurn }) {
         );
     }
 
-    // User turn (tool results only shown above, actual user messages are plain)
+    // User turn: text messages as bubble, tool results as labelled section
+    const hasOnlyText = turn.blocks.every((b) => b.type === 'text');
+
+    if (hasOnlyText) {
+        return (
+            <div className="flex justify-end py-1">
+                <div className="max-w-[85%] bg-zinc-800 rounded-2xl rounded-br-md px-4 py-2.5 text-sm text-zinc-100">
+                    {turn.blocks.map((block, i) => {
+                        if (block.type === 'text')
+                            return (
+                                <p key={i} className="whitespace-pre-wrap leading-relaxed">
+                                    {block.text}
+                                </p>
+                            );
+                        return null;
+                    })}
+                </div>
+            </div>
+        );
+    }
+
     return (
         <div className="flex flex-col gap-2 py-2">
             <div className="flex items-center gap-2 text-[11px] text-zinc-600 uppercase tracking-wider font-medium">
                 <span className="w-4 h-px bg-zinc-800" />
-                You
+                Tool Results
                 <span className="flex-1 h-px bg-zinc-800/50" />
             </div>
             <div className="pl-2 flex flex-col gap-2">

@@ -9,9 +9,9 @@ interface StatsPanelProps {
 
 function StatItem({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
     return (
-        <div className="flex items-center gap-1.5 text-xs text-zinc-400">
-            <span className="text-zinc-600 shrink-0">{icon}</span>
-            <span className="text-zinc-600 shrink-0">{label}</span>
+        <div className="flex items-center gap-1.5 text-xs text-zinc-400 shrink-0">
+            <span className="text-zinc-600">{icon}</span>
+            <span className="text-zinc-600">{label}</span>
             <span className="text-zinc-300 font-mono">{value}</span>
         </div>
     );
@@ -26,7 +26,6 @@ export function StatsPanel({ session }: StatsPanelProps) {
 
     const { stats } = session;
 
-    // Top tool calls
     const topTools = Object.entries(stats.tool_calls ?? {})
         .sort(([, a], [, b]) => b - a)
         .slice(0, 3);
@@ -34,17 +33,13 @@ export function StatsPanel({ session }: StatsPanelProps) {
     const remainingTools = totalToolTypes - topTools.length;
 
     return (
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 px-4 py-2.5 border-b border-zinc-800 bg-zinc-900/50">
-            {/* Duration */}
+        <div className="flex items-center gap-4 px-4 py-2 border-b border-zinc-800 bg-zinc-900/50 overflow-x-auto shrink-0 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             <StatItem icon={<Clock size={12} />} label="Duration" value={duration} />
 
-            {/* Tokens */}
-            <div className="flex items-center gap-1.5 text-xs text-zinc-400">
-                <span className="text-zinc-600 shrink-0">
-                    <Coins size={12} />
-                </span>
-                <span className="text-zinc-600 shrink-0">Tokens</span>
-                <span className="text-zinc-300 font-mono">
+            <div className="flex items-center gap-1.5 text-xs text-zinc-400 shrink-0">
+                <span className="text-zinc-600"><Coins size={12} /></span>
+                <span className="text-zinc-600">Tokens</span>
+                <span className="text-zinc-300 font-mono whitespace-nowrap">
                     {formatTokens(stats.input_tokens)}
                     <span className="text-zinc-600">↑</span>
                     {formatTokens(stats.output_tokens)}
@@ -52,24 +47,17 @@ export function StatsPanel({ session }: StatsPanelProps) {
                 </span>
             </div>
 
-            {/* Cost */}
             <StatItem icon={<span>$</span>} label="Cost" value={formatCost(stats.cost_usd)} />
-
-            {/* Turns */}
             <StatItem icon={<Hash size={12} />} label="Turns" value={String(stats.turns)} />
 
-            {/* Tool calls */}
             {topTools.length > 0 && (
-                <div className="flex items-center gap-1.5 text-xs text-zinc-400">
-                    <span className="text-zinc-600 shrink-0">
-                        <Wrench size={12} />
-                    </span>
-                    <span className="text-zinc-600 shrink-0">Tools</span>
+                <div className="flex items-center gap-1.5 text-xs text-zinc-400 shrink-0">
+                    <span className="text-zinc-600"><Wrench size={12} /></span>
+                    <span className="text-zinc-600">Tools</span>
                     <div className="flex items-center gap-1 font-mono">
                         {topTools.map(([name, count]) => (
-                            <span key={name} className="text-zinc-300">
-                                {name}
-                                <span className="text-zinc-500">×{count}</span>
+                            <span key={name} className="text-zinc-300 whitespace-nowrap">
+                                {name}<span className="text-zinc-500">×{count}</span>
                             </span>
                         ))}
                         {remainingTools > 0 && (
@@ -79,13 +67,12 @@ export function StatsPanel({ session }: StatsPanelProps) {
                 </div>
             )}
 
-            {/* Stop reason */}
             {stats.stop_reason && (
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-1.5 shrink-0">
                     <AlertCircle size={12} className="text-zinc-600" />
                     <span
                         className={cn(
-                            'text-[10px] font-medium px-1.5 py-0.5 rounded ring-1 ring-inset',
+                            'text-[10px] font-medium px-1.5 py-0.5 rounded ring-1 ring-inset whitespace-nowrap',
                             getStatusBgColor(
                                 stats.stop_reason === 'end_turn'
                                     ? 'completed'

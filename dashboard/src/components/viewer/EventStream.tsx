@@ -196,32 +196,42 @@ function accumulateEvents(events: ClaudeEvent[]): ConversationTurn[] {
 
         if (eventType === 'user') {
             const message = event['message'] as Record<string, unknown> | undefined;
-            const content = (event['content'] ?? message?.['content']) as unknown[] | undefined;
-            if (!content) continue;
+            const rawContent = event['content'] ?? message?.['content'];
 
+            let userText = '';
             const toolResults: ToolResultBlock[] = [];
-            for (const item of content) {
-                const c = item as Record<string, unknown>;
-                if (c['type'] === 'tool_result') {
-                    const rawContent = c['content'];
-                    let resultText = '';
-                    if (typeof rawContent === 'string') {
-                        resultText = rawContent;
-                    } else if (Array.isArray(rawContent)) {
-                        resultText = (rawContent as Array<Record<string, unknown>>)
-                            .filter((r) => r['type'] === 'text')
-                            .map((r) => r['text'] as string)
-                            .join('\n');
+
+            if (typeof rawContent === 'string') {
+                userText = rawContent;
+            } else if (Array.isArray(rawContent)) {
+                for (const item of rawContent) {
+                    const c = item as Record<string, unknown>;
+                    if (c['type'] === 'tool_result') {
+                        const rc = c['content'];
+                        let resultText = '';
+                        if (typeof rc === 'string') {
+                            resultText = rc;
+                        } else if (Array.isArray(rc)) {
+                            resultText = (rc as Array<Record<string, unknown>>)
+                                .filter((r) => r['type'] === 'text')
+                                .map((r) => r['text'] as string)
+                                .join('\n');
+                        }
+                        toolResults.push({
+                            type: 'tool_result',
+                            tool_use_id: (c['tool_use_id'] as string | undefined) ?? '',
+                            content: resultText,
+                            is_error: (c['is_error'] as boolean | undefined) ?? false,
+                        });
+                    } else if (c['type'] === 'text') {
+                        userText += (c['text'] as string | undefined) ?? '';
                     }
-                    toolResults.push({
-                        type: 'tool_result',
-                        tool_use_id: (c['tool_use_id'] as string | undefined) ?? '',
-                        content: resultText,
-                        is_error: (c['is_error'] as boolean | undefined) ?? false,
-                    });
                 }
             }
 
+            if (userText) {
+                turns.push({ role: 'user', blocks: [{ type: 'text', text: userText, done: true }] });
+            }
             if (toolResults.length > 0) {
                 turns.push({ role: 'user', blocks: toolResults });
             }

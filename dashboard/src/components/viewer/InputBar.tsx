@@ -1,10 +1,9 @@
 import { useState, useRef, useEffect } from 'react';
 import { Send, Square, Mic, MicOff, ChevronRight } from 'lucide-react';
-import { useMutation } from '@tanstack/react-query';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { sendInput, fetchStatus } from '../../api/client';
 import { cn } from '../../lib/utils';
-import type { SlashCommand } from '../../types';
+import type { ClaudeEvent, SlashCommand } from '../../types';
 
 interface Props {
     sessionId: string;
@@ -15,6 +14,7 @@ interface Props {
 export function InputBar({ sessionId, onKill, pending = false }: Props) {
     const { data: status } = useQuery({ queryKey: ['status'], queryFn: fetchStatus, staleTime: 0 });
     const commands: SlashCommand[] = status?.commands ?? [];
+    const queryClient = useQueryClient();
 
     const [text, setText] = useState('');
     const [isListening, setIsListening] = useState(false);
@@ -25,6 +25,18 @@ export function InputBar({ sessionId, onKill, pending = false }: Props) {
 
     const sendMutation = useMutation({
         mutationFn: (t: string) => sendInput(sessionId, t),
+        onMutate: (t: string) => {
+            queryClient.setQueryData<{ session_id: string; events: ClaudeEvent[] }>(
+                ['history', sessionId],
+                (old) => ({
+                    session_id: sessionId,
+                    events: [
+                        ...(old?.events ?? []),
+                        { type: 'user', message: { role: 'user', content: t } } as ClaudeEvent,
+                    ],
+                }),
+            );
+        },
     });
 
     const filteredCommands: SlashCommand[] = text.startsWith('/')
