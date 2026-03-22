@@ -36,7 +36,6 @@ Edit `.env`:
 
 ```env
 CLIENT_TOKEN=your-secret-token        # shared with the client daemon
-DASHBOARD_TOKEN=your-secret-token     # for browser access
 NTFY_TOKEN=your-ntfy-token            # optional, for phone notifications
 PUBLIC_URL=http://homelab.local:8080  # used in ntfy click-through links
 ```
@@ -47,7 +46,7 @@ PUBLIC_URL=http://homelab.local:8080  # used in ntfy click-through links
 docker compose up -d
 ```
 
-The dashboard is served at `http://homelab.local:8080?token=<DASHBOARD_TOKEN>`.
+The dashboard is served at `http://homelab.local:8080`.
 
 Session data is persisted to a Docker volume (`claude_data`) and survives restarts.
 
@@ -122,7 +121,6 @@ Each session sends a single persistent notification to your phone that updates i
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CLIENT_TOKEN` | — | **Required.** Auth token for client daemon connections |
-| `DASHBOARD_TOKEN` | — | **Required.** Auth token for dashboard access |
 | `HOST` | `0.0.0.0` | Bind address |
 | `PORT` | `8080` | Bind port |
 | `PUBLIC_URL` | `http://localhost:8080` | Public URL used in ntfy click links |

@@ -20,19 +20,6 @@ pub async fn handler(
     stream: web::Payload,
     state: web::Data<Arc<AppState>>,
 ) -> Result<HttpResponse, Error> {
-    // --- Authentication via ?token= query param ---
-    let token_param = web::Query::<std::collections::HashMap<String, String>>::from_query(
-        req.query_string(),
-    )
-    .ok()
-    .and_then(|q| q.into_inner().remove("token"))
-    .unwrap_or_default();
-
-    if token_param != state.dashboard_token {
-        warn!("dashboard_ws: rejected connection — bad token");
-        return Ok(HttpResponse::Unauthorized().body("invalid token"));
-    }
-
     let (response, ws_session, msg_stream) = actix_ws::handle(&req, stream)?;
 
     let state_clone: Arc<AppState> = Arc::clone(&state);

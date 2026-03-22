@@ -7,8 +7,7 @@ services:
             - "${PORT:-8080}:8080"
         environment:
             CLIENT_TOKEN: ${CLIENT_TOKEN:?CLIENT_TOKEN is required}
-            DASHBOARD_TOKEN: ${DASHBOARD_TOKEN:?DASHBOARD_TOKEN is required}
-            NTFY_URL: ${NTFY_URL:-https://ntfy.drewett.dev/claude}
+            NTFY_URL: ${NTFY_URL:-https://ntfy.sh/claude}
             NTFY_TOKEN: ${NTFY_TOKEN:-}
             PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
             MAX_BUFFER: ${MAX_BUFFER:-5000}

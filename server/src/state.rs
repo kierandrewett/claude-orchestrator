@@ -35,7 +35,6 @@ pub struct SessionBuffer {
 
 pub struct AppState {
     pub client_token: String,
-    pub dashboard_token: String,
     pub ntfy: Arc<crate::ntfy::NtfyManager>,
     pub max_buffer: usize,
     pub client: RwLock<Option<ClientHandle>>,
@@ -62,8 +61,6 @@ impl AppState {
         Arc::new(Self {
             client_token: std::env::var("CLIENT_TOKEN")
                 .unwrap_or_else(|_| "client-secret".to_string()),
-            dashboard_token: std::env::var("DASHBOARD_TOKEN")
-                .unwrap_or_else(|_| "dashboard-secret".to_string()),
             ntfy: crate::ntfy::NtfyManager::new(
                 std::env::var("NTFY_URL")
                     .unwrap_or_else(|_| "https://ntfy.drewett.dev/claude".to_string()),

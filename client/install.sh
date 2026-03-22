@@ -30,7 +30,7 @@ echo "✓ Binary installed to $INSTALL_DIR/$BINARY_NAME"
 # Config dir + env template
 mkdir -p "$CONFIG_DIR"
 if [ ! -f "$CONFIG_DIR/env" ]; then
-    cp "$SCRIPT_DIR/../.env.client.example" "$CONFIG_DIR/env"
+    cp "$SCRIPT_DIR/../.env-client.example" "$CONFIG_DIR/env"
     echo "✓ Created $CONFIG_DIR/env — edit this with your settings"
 else
     echo "  (skipped env file — already exists at $CONFIG_DIR/env)"

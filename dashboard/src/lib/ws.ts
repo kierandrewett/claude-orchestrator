@@ -15,13 +15,8 @@ class WsClient {
     private connecting = false;
 
     constructor() {
-        const token =
-            new URLSearchParams(window.location.search).get('token') ||
-            localStorage.getItem('dashboard_token') ||
-            '';
         const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
-        this.url = `${proto}//${window.location.host}/ws/dashboard${tokenParam}`;
+        this.url = `${proto}//${window.location.host}/ws/dashboard`;
     }
 
     connect(): void {
