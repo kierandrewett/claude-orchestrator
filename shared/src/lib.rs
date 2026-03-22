@@ -141,6 +141,22 @@ pub struct VmConfigProto {
     pub tools: ToolsConfigProto,
 }
 
+impl Default for VmConfigProto {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            firecracker_path: String::new(),
+            kernel_path: String::new(),
+            rootfs_path: String::new(),
+            data_dir: String::new(),
+            vcpus: 2,
+            memory_mb: 2048,
+            mounts: Vec::new(),
+            tools: ToolsConfigProto::default(),
+        }
+    }
+}
+
 /// Response type used by AppState for pending VM config requests.
 #[derive(Debug)]
 pub enum VmConfigResponse {

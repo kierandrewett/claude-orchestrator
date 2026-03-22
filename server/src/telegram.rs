@@ -70,6 +70,10 @@ enum Cmd {
     #[command(description = "Stop Claude immediately")]
     Stop,
     // ── VM management ──
+    #[command(description = "Create initial VM config: /vminit <firecracker> <kernel> <rootfs> [data_dir]")]
+    Vminit(String),
+    #[command(description = "Set a VM path field: /vmset firecracker|kernel|rootfs|datadir|vcpus|memory <value>")]
+    Vmset(String),
     #[command(description = "Show VM config")]
     Vmconfig,
     #[command(description = "Add mount: /vmaddmount <name> <host_path> <guest_path> [size_gb]")]
@@ -317,6 +321,105 @@ async fn handle_command(
         }
 
         // ── VM management commands ──────────────────────────────────────────
+
+        Cmd::Vminit(args) => {
+            let parts: Vec<&str> = args.split_whitespace().collect();
+            if parts.len() < 3 {
+                bot.send_message(
+                    chat_id,
+                    "Usage: /vminit <firecracker_path> <kernel_path> <rootfs_path> [data_dir]\n\
+                     Example: /vminit /usr/bin/firecracker /home/user/vmlinux /home/user/rootfs.ext4",
+                )
+                .await?;
+                return Ok(());
+            }
+            let firecracker_path = parts[0].to_string();
+            let kernel_path = parts[1].to_string();
+            let rootfs_path = parts[2].to_string();
+            let data_dir = parts
+                .get(3)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "/var/lib/claude-vm".to_string());
+
+            vm_update_config(&bot, chat_id, &app_state, move |c| {
+                c.firecracker_path = firecracker_path;
+                c.kernel_path = kernel_path;
+                c.rootfs_path = rootfs_path;
+                c.data_dir = data_dir;
+            })
+            .await?;
+        }
+
+        Cmd::Vmset(args) => {
+            let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
+            if parts.len() < 2 {
+                bot.send_message(
+                    chat_id,
+                    "Usage: /vmset <field> <value>\n\
+                     Fields: firecracker, kernel, rootfs, datadir, vcpus, memory",
+                )
+                .await?;
+                return Ok(());
+            }
+            let field = parts[0].to_lowercase();
+            let value = parts[1].trim().to_string();
+            match field.as_str() {
+                "firecracker" => {
+                    vm_update_config(&bot, chat_id, &app_state, move |c| {
+                        c.firecracker_path = value;
+                    })
+                    .await?;
+                }
+                "kernel" => {
+                    vm_update_config(&bot, chat_id, &app_state, move |c| {
+                        c.kernel_path = value;
+                    })
+                    .await?;
+                }
+                "rootfs" => {
+                    vm_update_config(&bot, chat_id, &app_state, move |c| {
+                        c.rootfs_path = value;
+                    })
+                    .await?;
+                }
+                "datadir" => {
+                    vm_update_config(&bot, chat_id, &app_state, move |c| {
+                        c.data_dir = value;
+                    })
+                    .await?;
+                }
+                "vcpus" => match value.parse::<u32>() {
+                    Ok(n) => {
+                        vm_update_config(&bot, chat_id, &app_state, move |c| {
+                            c.vcpus = n;
+                        })
+                        .await?;
+                    }
+                    Err(_) => {
+                        bot.send_message(chat_id, "❌ vcpus must be a positive integer")
+                            .await?;
+                    }
+                },
+                "memory" => match value.parse::<u32>() {
+                    Ok(n) => {
+                        vm_update_config(&bot, chat_id, &app_state, move |c| {
+                            c.memory_mb = n;
+                        })
+                        .await?;
+                    }
+                    Err(_) => {
+                        bot.send_message(chat_id, "❌ memory must be a number (MB)").await?;
+                    }
+                },
+                _ => {
+                    bot.send_message(
+                        chat_id,
+                        "❌ Unknown field. Valid fields: firecracker, kernel, rootfs, datadir, vcpus, memory",
+                    )
+                    .await?;
+                }
+            }
+        }
 
         Cmd::Vmconfig => {
             match vm_get_config(&app_state).await {
@@ -742,8 +845,8 @@ async fn vm_get_config(app_state: &Arc<AppState>) -> anyhow::Result<VmConfigProt
     }
 }
 
-/// Gets the current VM config, applies `mutate`, sends it back via
-/// `SetVmConfig`, and sends a confirmation or error message to `chat_id`.
+/// Gets the current VM config (or creates a default), applies `mutate`, sends
+/// it back via `SetVmConfig`, and sends a confirmation or error message.
 async fn vm_update_config<F>(
     bot: &Bot,
     chat_id: ChatId,
@@ -755,10 +858,8 @@ where
 {
     let mut cfg = match vm_get_config(app_state).await {
         Ok(c) => c,
-        Err(e) => {
-            bot.send_message(chat_id, format!("❌ {e}")).await?;
-            return Ok(());
-        }
+        // No config yet — start from an empty default so commands can bootstrap it.
+        Err(_) => VmConfigProto::default(),
     };
 
     mutate(&mut cfg);
