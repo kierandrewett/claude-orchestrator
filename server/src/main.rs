@@ -1,3 +1,4 @@
+mod cleanup;
 mod client_ws;
 mod dashboard_api;
 mod ntfy;
@@ -64,6 +65,14 @@ async fn main() -> std::io::Result<()> {
 
     info!("claude-server: data_dir={data_dir}");
     app_state.load_from_disk().await;
+
+    // Background session cleanup
+    {
+        let cleanup_state = app_state.clone();
+        tokio::spawn(async move {
+            cleanup::run(cleanup_state).await;
+        });
+    }
 
     // Start Telegram bot if token is configured
     if let Ok(token) = std::env::var("TELEGRAM_BOT_TOKEN") {
