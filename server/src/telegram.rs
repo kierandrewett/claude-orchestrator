@@ -452,11 +452,14 @@ async fn collect_and_send(
                                 info!("telegram: session {session_id} got {evt_type}, sending {} chars", text.len());
                                 break;
                             }
-                            // Turn-complete format: extract text from content array
+                            // Turn-complete format: content is at event.message.content
                             "assistant" => {
-                                if let Some(content) =
-                                    event.get("content").and_then(|c| c.as_array())
-                                {
+                                let content = event
+                                    .pointer("/message/content")
+                                    .or_else(|| event.get("content"))
+                                    .and_then(|c| c.as_array());
+
+                                if let Some(content) = content {
                                     for block in content {
                                         if block
                                             .get("type")
