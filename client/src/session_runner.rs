@@ -27,19 +27,42 @@ pub type WsSink = futures_util::stream::SplitSink<
 
 /// Spawns a Claude process for this session, streams its output back as
 /// `C2S::SessionEvent` messages, and forwards stdin commands from the server.
+///
+/// If VM mode is enabled in the config, Claude **only** runs inside the
+/// Firecracker VM — it is never spawned on the host. If the config file exists
+/// but cannot be parsed, the session is aborted rather than falling back to the
+/// host.
 pub async fn run_session(
     config: SessionConfig,
     ws_tx: Arc<Mutex<WsSink>>,
     cmd_rx: mpsc::Receiver<S2C>,
 ) {
-    // If VM mode is enabled, delegate to the VM orchestrator.
-    if let Ok(Some(vm_cfg)) = crate::vm::config::VmConfig::load() {
-        if vm_cfg.enabled {
+    match crate::vm::config::VmConfig::load() {
+        Ok(Some(vm_cfg)) if vm_cfg.enabled => {
+            // VM mode is explicitly enabled — run inside Firecracker only.
             crate::vm::run_vm_session(config, ws_tx, cmd_rx, vm_cfg).await;
-            return;
+        }
+        Ok(Some(_)) | Ok(None) => {
+            // VM mode disabled or no config file — run directly on host.
+            run_session_direct(config, ws_tx, cmd_rx).await;
+        }
+        Err(e) => {
+            // Config exists but failed to load — refuse to run on host.
+            tracing::error!(
+                "session {}: VM config could not be loaded, refusing to run on host: {e}",
+                config.session_id
+            );
+            ws_send(
+                &ws_tx,
+                &crate::protocol::C2S::SessionEnded {
+                    session_id: config.session_id,
+                    exit_code: 1,
+                    stats: Default::default(),
+                },
+            )
+            .await;
         }
     }
-    run_session_direct(config, ws_tx, cmd_rx).await;
 }
 
 async fn run_session_direct(
