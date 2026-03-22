@@ -55,12 +55,15 @@ impl FirecrackerVm {
         let _ = std::fs::remove_file(api_socket);
         let _ = std::fs::remove_file(vsock_socket);
 
-        // When networking is requested, run Firecracker inside a private netns
-        // via `unshare --net`. unshare(1) exec's into Firecracker so the child
-        // PID ends up being the Firecracker process.
+        // When networking is requested, run Firecracker inside a private
+        // user+network namespace via `unshare --user --map-root-user --net`.
+        // The user namespace is required so that slirp4netns (which runs as the
+        // same unprivileged user) can enter the network namespace without needing
+        // CAP_SYS_ADMIN. --map-root-user makes the process appear as uid 0
+        // inside the namespace (but it's still the real user on the host).
         let child = if enable_network {
             Command::new("unshare")
-                .args(["--net", "--", firecracker_path, "--api-sock", api_socket])
+                .args(["--user", "--map-root-user", "--net", "--", firecracker_path, "--api-sock", api_socket])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -206,6 +209,10 @@ impl FirecrackerVm {
 ///
 /// Waits until slirp4netns prints "network [N] configured" to stdout,
 /// indicating that `tap0` is up and the user-space NAT is running.
+/// Spawn slirp4netns targeting `fc_pid`'s network namespace.
+///
+/// Waits until slirp4netns prints "network [N] configured" to stdout,
+/// indicating that `tap0` is up and the user-space NAT is running.
 async fn start_slirp4netns(fc_pid: u32) -> Result<Child> {
     info!("vm: starting slirp4netns for pid {fc_pid}");
 
@@ -218,29 +225,39 @@ async fn start_slirp4netns(fc_pid: u32) -> Result<Child> {
             "tap0",
         ])
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())   // capture stderr so we can report the actual error
         .kill_on_drop(true)
         .spawn()
         .context("spawn slirp4netns")?;
 
-    // Wait for slirp4netns to print "network [N] configured\n"
     let stdout = slirp.stdout.take().expect("stdout was piped");
-    let mut reader = BufReader::new(stdout).lines();
+    let mut stderr = slirp.stderr.take().expect("stderr was piped");
+    let mut stdout_lines = BufReader::new(stdout).lines();
 
+    // Wait for "network [N] configured" on stdout.
+    // If the process exits first (EOF), collect stderr for diagnostics.
     let ready = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while let Ok(Some(line)) = reader.next_line().await {
+        while let Ok(Some(line)) = stdout_lines.next_line().await {
             if line.contains("configured") {
                 return true;
             }
         }
-        false
+        false // EOF — process exited without printing "configured"
     })
     .await
     .unwrap_or(false);
 
     if !ready {
+        // Collect whatever slirp4netns printed to stderr for the error message.
+        let mut err_output = String::new();
+        let _ = tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut err_output).await;
         let _ = slirp.kill().await;
-        anyhow::bail!("slirp4netns did not become ready within 10s");
+
+        if err_output.trim().is_empty() {
+            anyhow::bail!("slirp4netns did not become ready (no output within 10s)");
+        } else {
+            anyhow::bail!("slirp4netns failed: {}", err_output.trim());
+        }
     }
 
     info!("vm: slirp4netns ready (tap0 up, NAT active)");
