@@ -43,6 +43,7 @@ pub async fn run_session(
     let mut cmd = Command::new(&config.claude_path);
     cmd.args([
         "--print",
+        "--verbose",
         "--input-format",
         "stream-json",
         "--output-format",
