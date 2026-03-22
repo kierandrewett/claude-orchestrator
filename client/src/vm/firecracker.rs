@@ -157,23 +157,18 @@ async fn api_put(socket_path: &str, path: &str, body: Value) -> Result<()> {
         body_str.len(),
     );
 
-    let stream = UnixStream::connect(socket_path)
+    let mut stream = UnixStream::connect(socket_path)
         .await
         .with_context(|| format!("connect to Firecracker socket {socket_path}"))?;
 
-    let (reader, mut writer) = stream.into_split();
-
-    writer
+    stream
         .write_all(request.as_bytes())
         .await
         .context("write HTTP request")?;
 
-    // Signal EOF on the write side so Firecracker knows the request is complete
-    // and can send its response without waiting for more data.
-    writer.shutdown().await.context("shutdown write half")?;
-
-    // Read the status line to check for errors.
-    let mut reader = BufReader::new(reader);
+    // Read the status line. Firecracker uses Content-Length so it knows when
+    // the request body ends — no write-EOF needed (and sending one causes RST).
+    let mut reader = BufReader::new(&mut stream);
     let mut status_line = String::new();
     reader
         .read_line(&mut status_line)
@@ -200,11 +195,17 @@ async fn api_put(socket_path: &str, path: &str, body: Value) -> Result<()> {
 
 async fn wait_for_socket(path: &str, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
-    while !Path::new(path).exists() {
+    loop {
         if Instant::now() > deadline {
-            anyhow::bail!("socket {path} did not appear");
+            anyhow::bail!("Firecracker API socket {path} did not become ready within {}s", timeout.as_secs());
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        // Test actual connectivity, not just file existence — the socket file
+        // can appear before micro-http is ready to accept connections.
+        if Path::new(path).exists() {
+            if UnixStream::connect(path).await.is_ok() {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    Ok(())
 }
