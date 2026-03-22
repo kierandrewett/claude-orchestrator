@@ -21,13 +21,17 @@ use std::{
 };
 
 use chrono::Utc;
-use teloxide::{prelude::*, types::{MessageId, ReplyParameters}, utils::command::BotCommands};
+use teloxide::{
+    prelude::*,
+    types::{MessageId, ReplyParameters},
+    utils::command::BotCommands,
+};
 use tokio::sync::{broadcast, RwLock};
 use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
-    protocol::{S2C, S2D, SessionInfo, SessionStats, SessionStatus},
+    protocol::{SessionInfo, SessionStats, SessionStatus, S2C, S2D},
     state::{AppState, SessionBuffer},
 };
 
@@ -201,8 +205,7 @@ async fn handle_command(
                 let sessions = app_state.sessions.read().await;
                 if let Some(buf) = sessions.get(&state.session_id) {
                     let age = state.created_at.elapsed();
-                    let remaining =
-                        SESSION_LIFETIME.as_secs().saturating_sub(age.as_secs());
+                    let remaining = SESSION_LIFETIME.as_secs().saturating_sub(age.as_secs());
                     let status_str = format!("{:?}", buf.info.status).to_lowercase();
                     let stats = &buf.info.stats;
                     bot.send_message(
@@ -283,10 +286,15 @@ async fn handle_message(
             let sessions = app_state.sessions.read().await;
             sessions
                 .get(&id)
-                .map(|b| matches!(
-                    b.info.status,
-                    SessionStatus::Pending | SessionStatus::Completed | SessionStatus::Failed | SessionStatus::Killed
-                ))
+                .map(|b| {
+                    matches!(
+                        b.info.status,
+                        SessionStatus::Pending
+                            | SessionStatus::Completed
+                            | SessionStatus::Failed
+                            | SessionStatus::Killed
+                    )
+                })
                 .unwrap_or(true)
         };
 
@@ -410,6 +418,9 @@ async fn create_session(
 
 /// Subscribes to the broadcast channel, accumulates Claude's text response for
 /// `session_id`, then sends it to Telegram (optionally as a reply).
+///
+/// While Claude is working, tool calls are displayed as a live-edited status
+/// message. When the final text response arrives it is sent as a new message.
 async fn collect_and_send(
     bot: Bot,
     chat_id: ChatId,
@@ -419,7 +430,17 @@ async fn collect_and_send(
 ) {
     info!("telegram: collect_and_send waiting for response on session {session_id}");
     let deadline = tokio::time::Instant::now() + RESPONSE_TIMEOUT;
+
+    // Accumulated final text response.
     let mut text = String::new();
+
+    // Live tool-call tracking.
+    // Each entry is (tool_name, partial_input_json).
+    let mut completed_tools: Vec<(String, String)> = Vec::new();
+    // The tool currently being streamed.
+    let mut current_tool: Option<(String, String)> = None;
+    // The Telegram message used to show live tool status (created on first tool call).
+    let mut status_msg_id: Option<MessageId> = None;
 
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -438,30 +459,87 @@ async fn collect_and_send(
                         session_id: sid,
                         event,
                     } if sid == session_id => {
-                        let evt_type =
-                            event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        let evt_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
                         match evt_type {
                             // Streaming events are wrapped in stream_event — unwrap and
-                            // extract text deltas from inner content_block_delta events.
+                            // extract text deltas and tool call info from inner events.
                             "stream_event" => {
                                 if let Some(inner) = event.get("event") {
-                                    if inner
-                                        .get("type")
-                                        .and_then(|t| t.as_str())
-                                        == Some("content_block_delta")
-                                    {
-                                        if let Some(t) =
-                                            inner.pointer("/delta/text").and_then(|t| t.as_str())
-                                        {
-                                            text.push_str(t);
+                                    let inner_type =
+                                        inner.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+                                    match inner_type {
+                                        "content_block_start" => {
+                                            // Detect start of a tool_use block.
+                                            if inner
+                                                .pointer("/content_block/type")
+                                                .and_then(|t| t.as_str())
+                                                == Some("tool_use")
+                                            {
+                                                let name = inner
+                                                    .pointer("/content_block/name")
+                                                    .and_then(|n| n.as_str())
+                                                    .unwrap_or("unknown")
+                                                    .to_string();
+                                                current_tool = Some((name, String::new()));
+                                            }
                                         }
+                                        "content_block_delta" => {
+                                            // Text delta → accumulate response text.
+                                            if let Some(t) = inner
+                                                .pointer("/delta/text")
+                                                .and_then(|t| t.as_str())
+                                            {
+                                                text.push_str(t);
+                                            }
+                                            // Input JSON delta → accumulate tool input.
+                                            if let Some(partial) = inner
+                                                .pointer("/delta/partial_json")
+                                                .and_then(|t| t.as_str())
+                                            {
+                                                if let Some((_, ref mut input)) = current_tool {
+                                                    input.push_str(partial);
+                                                }
+                                            }
+                                        }
+                                        "content_block_stop" => {
+                                            // Finalise current tool call and update status.
+                                            if let Some(tool) = current_tool.take() {
+                                                completed_tools.push(tool);
+                                                status_msg_id = update_tool_status(
+                                                    &bot,
+                                                    chat_id,
+                                                    reply_to,
+                                                    &completed_tools,
+                                                    status_msg_id,
+                                                    false,
+                                                )
+                                                .await;
+                                            }
+                                        }
+                                        _ => {}
                                     }
                                 }
                             }
-                            // result marks the end of the entire Claude turn (incl. all tool use)
+                            // result marks the end of the entire Claude turn (incl. all tool use).
                             "result" => {
-                                info!("telegram: session {session_id} result, sending {} chars", text.len());
+                                info!(
+                                    "telegram: session {session_id} result, sending {} chars",
+                                    text.len()
+                                );
+                                // Mark the tool status message as done.
+                                if status_msg_id.is_some() && !completed_tools.is_empty() {
+                                    update_tool_status(
+                                        &bot,
+                                        chat_id,
+                                        reply_to,
+                                        &completed_tools,
+                                        status_msg_id,
+                                        true,
+                                    )
+                                    .await;
+                                }
                                 break;
                             }
                             _ => {}
@@ -470,7 +548,10 @@ async fn collect_and_send(
                     S2D::SessionEnded {
                         session_id: sid, ..
                     } if sid == session_id => {
-                        info!("telegram: session {session_id} ended, sending {} chars", text.len());
+                        info!(
+                            "telegram: session {session_id} ended, sending {} chars",
+                            text.len()
+                        );
                         break;
                     }
                     _ => {}
@@ -504,6 +585,97 @@ async fn collect_and_send(
         if let Err(e) = req.await {
             warn!("telegram: failed to send message: {e}");
         }
+    }
+}
+
+/// Sends or edits the live tool-status message.
+///
+/// Returns the `MessageId` of the status message so the caller can pass it
+/// back on the next call for editing.
+async fn update_tool_status(
+    bot: &Bot,
+    chat_id: ChatId,
+    reply_to: Option<MessageId>,
+    tools: &[(String, String)],
+    existing_id: Option<MessageId>,
+    done: bool,
+) -> Option<MessageId> {
+    let body = format_tool_status(tools, done);
+
+    if let Some(mid) = existing_id {
+        match bot.edit_message_text(chat_id, mid, &body).await {
+            Ok(_) => return Some(mid),
+            Err(e) => {
+                warn!("telegram: failed to edit tool status message: {e}");
+                return Some(mid);
+            }
+        }
+    }
+
+    // No existing message — send a new one.
+    let mut req = bot.send_message(chat_id, &body);
+    if let Some(rid) = reply_to {
+        req = req.reply_parameters(ReplyParameters::new(rid));
+    }
+    match req.await {
+        Ok(msg) => Some(msg.id),
+        Err(e) => {
+            warn!("telegram: failed to send tool status message: {e}");
+            None
+        }
+    }
+}
+
+/// Formats the list of completed tool calls into a compact status string.
+fn format_tool_status(tools: &[(String, String)], done: bool) -> String {
+    let icon = if done { "✅" } else { "⚙️" };
+    let mut lines = vec![format!("{icon} Tool calls")];
+    for (name, input) in tools {
+        let summary = summarise_tool_input(input);
+        if summary.is_empty() {
+            lines.push(format!("• {name}"));
+        } else {
+            lines.push(format!("• {name} — {summary}"));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Returns a short human-readable summary of a (possibly partial) JSON input string.
+fn summarise_tool_input(input: &str) -> String {
+    if input.is_empty() {
+        return String::new();
+    }
+    // Try to parse as a JSON object and list top-level keys / first value.
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(input) {
+        // Show the first key=value pair as a hint (truncated).
+        if let Some((k, v)) = map.iter().next() {
+            let val = match v {
+                serde_json::Value::String(s) => {
+                    if s.len() > 50 {
+                        format!("{}…", &s[..50])
+                    } else {
+                        s.clone()
+                    }
+                }
+                other => {
+                    let s = other.to_string();
+                    if s.len() > 50 {
+                        format!("{}…", &s[..50])
+                    } else {
+                        s
+                    }
+                }
+            };
+            return format!("{k}={val}");
+        }
+    }
+    // Fall back to a truncated raw string.
+    let trimmed = input.trim();
+    if trimmed.len() <= 60 {
+        trimmed.to_string()
+    } else {
+        format!("{}…", &trimmed[..60])
     }
 }
 

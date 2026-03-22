@@ -11,7 +11,7 @@ use chrono::Utc;
 use tracing::info;
 
 use crate::{
-    protocol::{S2C, SessionStatus},
+    protocol::{SessionStatus, S2C},
     state::AppState,
 };
 
