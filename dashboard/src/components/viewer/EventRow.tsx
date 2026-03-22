@@ -1,5 +1,7 @@
 import { Streamdown } from 'streamdown';
-import { code } from '@streamdown/code';
+import type { CodeHighlighterPlugin } from 'streamdown';
+import { code as _code } from '@streamdown/code';
+const code = _code as unknown as CodeHighlighterPlugin;
 import {
     ChevronDown,
     ChevronRight,
@@ -16,7 +18,6 @@ import { useState } from 'react';
 import { cn } from '../../lib/utils';
 import type {
     ConversationTurn,
-    ContentBlock,
     TextBlock,
     ToolUseBlock,
     ToolResultBlock,

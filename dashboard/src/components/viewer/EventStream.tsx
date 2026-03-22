@@ -125,7 +125,7 @@ function accumulateEvents(events: ClaudeEvent[]): ConversationTurn[] {
         }
 
         if (eventType === 'content_block_stop') {
-            const turn = currentAssistantTurn;
+            const turn = currentAssistantTurn as ConversationTurn | null;
             if (!turn) continue;
             const blockIndex = (event['index'] as number | undefined) ?? currentBlockIndex;
             const block = turn.blocks[blockIndex];

@@ -85,8 +85,9 @@ fn main() -> anyhow::Result<()> {
     // Build tray on the main thread (required by GTK)
     let mut tray = tray::Tray::new(Arc::clone(&tray_state))?;
 
-    let open_id = tray.open_id();
-    let quit_id = tray.quit_id();
+    let open_id    = tray.open_id();
+    let restart_id = tray.restart_id();
+    let quit_id    = tray.quit_id();
 
     // Register Ctrl-C / SIGTERM to trigger a clean shutdown
     let shutdown_tx_signal = shutdown_tx.clone();
@@ -106,6 +107,11 @@ fn main() -> anyhow::Result<()> {
             } else if event.id == open_id {
                 let url = tray_state.lock().unwrap().dashboard_url.clone();
                 let _ = open::that(url);
+            } else if event.id == restart_id {
+                info!("Restarting orchestrator via systemctl");
+                let _ = std::process::Command::new("systemctl")
+                    .args(["--user", "restart", "claude-client"])
+                    .spawn();
             }
         }
 

@@ -18,12 +18,13 @@ pub struct TrayState {
 }
 
 pub struct Tray {
-    icon:          TrayIcon,
-    state_item:    MenuItem,
-    sessions_item: MenuItem,
-    open_item:     MenuItem,
-    quit_item:     MenuItem,
-    last_count:    usize,
+    icon:           TrayIcon,
+    state_item:     MenuItem,
+    sessions_item:  MenuItem,
+    open_item:      MenuItem,
+    restart_item:   MenuItem,
+    quit_item:      MenuItem,
+    last_count:     usize,
 }
 
 impl Tray {
@@ -36,6 +37,7 @@ impl Tray {
         let state_item    = MenuItem::new("Disconnected", false, None);
         let sessions_item = MenuItem::new("No active sessions", false, None);
         let open_item     = MenuItem::new("Open Dashboard", true, None);
+        let restart_item  = MenuItem::new("Restart Orchestrator", true, None);
         let quit_item     = MenuItem::new("Quit", true, None);
 
         let menu = Menu::new();
@@ -45,6 +47,7 @@ impl Tray {
             &sessions_item,
             &PredefinedMenuItem::separator(),
             &open_item,
+            &restart_item,
             &PredefinedMenuItem::separator(),
             &quit_item,
         ])?;
@@ -65,6 +68,7 @@ impl Tray {
             state_item,
             sessions_item,
             open_item,
+            restart_item,
             quit_item,
             last_count: 0,
         })
@@ -94,8 +98,9 @@ impl Tray {
         }
     }
 
-    pub fn open_id(&self) -> MenuId { self.open_item.id().clone() }
-    pub fn quit_id(&self) -> MenuId { self.quit_item.id().clone() }
+    pub fn open_id(&self)    -> MenuId { self.open_item.id().clone() }
+    pub fn restart_id(&self) -> MenuId { self.restart_item.id().clone() }
+    pub fn quit_id(&self)    -> MenuId { self.quit_item.id().clone() }
 }
 
 // ── Icon rendering ────────────────────────────────────────────────────────────
