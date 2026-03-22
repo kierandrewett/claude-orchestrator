@@ -454,8 +454,9 @@ async fn collect_and_send(
                                 info!("telegram: session {session_id} got {evt_type}, sending {} chars", text.len());
                                 break;
                             }
-                            // Turn-complete format: content is at event.message.content
+                            // Turn-complete format
                             "assistant" => {
+                                info!("telegram: assistant event = {}", serde_json::to_string(&event).unwrap_or_default());
                                 let content = event
                                     .pointer("/message/content")
                                     .or_else(|| event.get("content"))
