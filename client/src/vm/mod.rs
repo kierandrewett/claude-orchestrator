@@ -117,19 +117,13 @@ async fn do_run(
         });
     }
 
-    // --- 2. Set up network (TAP + NAT) if enabled ---
-    let net_spec = if vm_cfg.network_enabled {
-        let spec = network::setup(session_id)
-            .await
-            .context("set up VM network (requires root/CAP_NET_ADMIN)")?;
-        info!("vm: network ready tap={} guest={}", spec.tap_name, spec.guest_ip);
-        Some(spec)
-    } else {
-        None
-    };
+    // --- 2. Check networking tools are available if network is enabled ---
+    if vm_cfg.network_enabled {
+        network::check_tools().context("VM networking requires slirp4netns and unshare")?;
+    }
 
-    // --- 3. Build boot args with mount map and optional network config ---
-    let boot_args = build_boot_args(&vm_cfg.mounts, net_spec.as_ref());
+    // --- 3. Build boot args with mount map ---
+    let boot_args = build_boot_args(&vm_cfg.mounts);
 
     // --- 4. Unique per-session socket paths ---
     let tmp = std::env::temp_dir();
@@ -142,7 +136,7 @@ async fn do_run(
         .to_string_lossy()
         .into_owned();
 
-    // --- 5. Start Firecracker ---
+    // --- 5. Start Firecracker (with slirp4netns if networking is enabled) ---
     let mut vm = FirecrackerVm::start(
         &vm_cfg.firecracker_path,
         &api_sock,
@@ -153,7 +147,7 @@ async fn do_run(
         vm_cfg.vcpus,
         vm_cfg.memory_mb,
         &boot_args,
-        net_spec.as_ref(),
+        vm_cfg.network_enabled,
     )
     .await
     .context("start Firecracker VM")?;
@@ -282,12 +276,7 @@ async fn do_run(
     let _ = std::fs::remove_file(&api_sock);
     let _ = std::fs::remove_file(&vsock_sock);
 
-    // --- 9. Tear down network ---
-    if let Some(ref spec) = net_spec {
-        network::teardown(spec).await;
-    }
-
-    // --- 10. Sync volumes back to host ---
+    // --- 9. Sync volumes back to host ---
     for mount in &vm_cfg.mounts {
         let image = vm_cfg.volume_image_path(&mount.name);
         info!("vm: syncing volume '{}' back to host", mount.name);
@@ -361,12 +350,8 @@ async fn connect_vsock(
     }
 }
 
-/// Construct the kernel boot args string, encoding the volume mount map and
-/// optional network configuration.
-pub fn build_boot_args(
-    mounts: &[config::VolumeMount],
-    net: Option<&network::NetworkSpec>,
-) -> String {
+/// Construct the kernel boot args string, encoding the volume mount map.
+pub fn build_boot_args(mounts: &[config::VolumeMount]) -> String {
     // Firecracker assigns drives in order: /dev/vda = rootfs, /dev/vdb, /dev/vdc, ...
     let pairs: Vec<String> = mounts
         .iter()
@@ -383,16 +368,7 @@ pub fn build_boot_args(
         format!(" vm_mounts={}", pairs.join(","))
     };
 
-    // vm_net=<guest_ip>/<prefix>,gw=<gateway>,dns=1.1.1.1
-    let vm_net = match net {
-        Some(n) => format!(
-            " vm_net={}/{},gw={},dns=1.1.1.1",
-            n.guest_ip, n.prefix_len, n.gateway_ip
-        ),
-        None => String::new(),
-    };
-
-    format!("console=ttyS0 reboot=k panic=1 pci=off nomodules{vm_mounts}{vm_net}")
+    format!("console=ttyS0 reboot=k panic=1 pci=off nomodules{vm_mounts}")
 }
 
 fn format_user_message(text: &str) -> String {
