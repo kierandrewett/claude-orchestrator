@@ -16,12 +16,7 @@ import {
 } from 'lucide-react';
 import { useState } from 'react';
 import { cn } from '../../lib/utils';
-import type {
-    ConversationTurn,
-    TextBlock,
-    ToolUseBlock,
-    ToolResultBlock,
-} from './EventStream';
+import type { ConversationTurn, TextBlock, ToolUseBlock, ToolResultBlock } from './EventStream';
 
 // Tool name → Lucide icon
 function ToolIcon({ name }: { name: string }) {

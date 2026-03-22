@@ -4,8 +4,8 @@ use std::{
 };
 
 use actix_ws::Session as WsSession;
-use tokio::sync::RwLock;
-use tracing::{error, warn};
+use tokio::sync::{broadcast, RwLock};
+use tracing::error;
 
 use crate::protocol::*;
 
@@ -39,8 +39,9 @@ pub struct AppState {
     pub max_buffer: usize,
     pub client: RwLock<Option<ClientHandle>>,
     pub sessions: RwLock<HashMap<String, SessionBuffer>>,
-    pub dashboards: RwLock<Vec<WsSession>>,
-    pub commands: RwLock<Vec<crate::protocol::SlashCommand>>,  // current slash command list from client
+    /// Broadcast channel for pushing S2D events to all SSE subscribers.
+    pub sse_tx: broadcast::Sender<String>,
+    pub commands: RwLock<Vec<crate::protocol::SlashCommand>>,
     pub store: Arc<crate::persist::Store>,
     pub pending_resumes: RwLock<Vec<SessionInfo>>,
 }
@@ -57,6 +58,8 @@ impl AppState {
             )
         });
 
+        let (sse_tx, _) = broadcast::channel(512);
+
         Arc::new(Self {
             client_token: std::env::var("CLIENT_TOKEN")
                 .unwrap_or_else(|_| "client-secret".to_string()),
@@ -72,7 +75,7 @@ impl AppState {
                 .unwrap_or(1000),
             client: RwLock::new(None),
             sessions: RwLock::new(HashMap::new()),
-            dashboards: RwLock::new(Vec::new()),
+            sse_tx,
             commands: RwLock::new(Vec::new()),
             store,
             pending_resumes: RwLock::new(Vec::new()),
@@ -90,7 +93,6 @@ impl AppState {
         for (mut info, events) in loaded {
             let needs_resume = info.status == SessionStatus::Running;
             if needs_resume {
-                // Mark as pending; will be resumed when the client daemon connects.
                 info.status = SessionStatus::Pending;
                 resumes.push(info.clone());
             }
@@ -110,7 +112,7 @@ impl AppState {
     }
 
     // -----------------------------------------------------------------------
-    // broadcast — send S2D to every connected dashboard, pruning dead sessions
+    // broadcast — send S2D JSON to every SSE subscriber
     // -----------------------------------------------------------------------
     pub async fn broadcast(&self, msg: &S2D) {
         let text = match serde_json::to_string(msg) {
@@ -120,32 +122,12 @@ impl AppState {
                 return;
             }
         };
-
-        // Collect sessions; we need to release the read lock before awaiting.
-        let sessions: Vec<WsSession> = {
-            let guard = self.dashboards.read().await;
-            guard.clone()
-        };
-
-        let mut live: Vec<WsSession> = Vec::with_capacity(sessions.len());
-        for mut ws in sessions {
-            match ws.text(text.clone()).await {
-                Ok(()) => live.push(ws),
-                Err(e) => {
-                    warn!("broadcast: dashboard send failed (removing): {e}");
-                    // session is already consumed / closed — drop it
-                }
-            }
-        }
-
-        // Write back only the live sessions.
-        let mut guard = self.dashboards.write().await;
-        *guard = live;
+        // A send error just means no subscribers are connected — ignore it.
+        let _ = self.sse_tx.send(text);
     }
 
     // -----------------------------------------------------------------------
     // send_to_client — send S2C to the connected client daemon
-    // Returns true if the message was delivered.
     // -----------------------------------------------------------------------
     pub async fn send_to_client(&self, msg: &S2C) -> bool {
         let text = match serde_json::to_string(msg) {
@@ -156,7 +138,6 @@ impl AppState {
             }
         };
 
-        // Clone the session handle so we can release the lock before awaiting.
         let session_clone: Option<WsSession> = {
             let guard = self.client.read().await;
             guard.as_ref().map(|c| c.session.clone())
@@ -164,7 +145,7 @@ impl AppState {
 
         match session_clone {
             None => {
-                warn!("send_to_client: no client connected");
+                tracing::warn!("send_to_client: no client connected");
                 false
             }
             Some(mut ws) => match ws.text(text).await {
@@ -181,7 +162,6 @@ impl AppState {
     // update_stats — parse a raw Claude NDJSON event and mutate SessionStats
     // -----------------------------------------------------------------------
     pub fn update_stats(stats: &mut SessionStats, event: &serde_json::Value) {
-        // message_start → input token count
         if event.get("type").and_then(|t| t.as_str()) == Some("message_start") {
             if let Some(tokens) = event
                 .pointer("/message/usage/input_tokens")
@@ -191,7 +171,6 @@ impl AppState {
             }
         }
 
-        // message_delta → output tokens and stop_reason
         if event.get("type").and_then(|t| t.as_str()) == Some("message_delta") {
             if let Some(tokens) = event
                 .pointer("/usage/output_tokens")
@@ -199,15 +178,11 @@ impl AppState {
             {
                 stats.output_tokens = stats.output_tokens.saturating_add(tokens);
             }
-            if let Some(reason) = event
-                .pointer("/delta/stop_reason")
-                .and_then(|v| v.as_str())
-            {
+            if let Some(reason) = event.pointer("/delta/stop_reason").and_then(|v| v.as_str()) {
                 stats.stop_reason = Some(reason.to_string());
             }
         }
 
-        // content_block_start with type=tool_use → count tool calls
         if event.get("type").and_then(|t| t.as_str()) == Some("content_block_start") {
             if event
                 .pointer("/content_block/type")
@@ -223,7 +198,6 @@ impl AppState {
             }
         }
 
-        // Turn-complete format: assistant message with tool_use content blocks
         if event.get("type").and_then(|t| t.as_str()) == Some("assistant") {
             if let Some(content) = event.get("content").and_then(|c| c.as_array()) {
                 for block in content {
@@ -236,7 +210,6 @@ impl AppState {
             }
         }
 
-        // result event → cost_usd, num_turns
         if event.get("type").and_then(|t| t.as_str()) == Some("result") {
             if let Some(cost) = event.get("cost_usd").and_then(|v| v.as_f64()) {
                 stats.cost_usd = Some(stats.cost_usd.unwrap_or(0.0) + cost);

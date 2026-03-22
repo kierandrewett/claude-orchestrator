@@ -1,9 +1,9 @@
+use anyhow::Result;
 use std::path::PathBuf;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use anyhow::Result;
 
-use crate::protocol::{SessionInfo};
+use crate::protocol::SessionInfo;
 
 pub struct Store {
     data_dir: PathBuf,
@@ -11,7 +11,9 @@ pub struct Store {
 
 impl Store {
     pub fn new(data_dir: impl Into<PathBuf>) -> Self {
-        Self { data_dir: data_dir.into() }
+        Self {
+            data_dir: data_dir.into(),
+        }
     }
 
     fn session_dir(&self, session_id: &str) -> PathBuf {

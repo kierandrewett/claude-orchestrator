@@ -176,7 +176,10 @@ async fn handle_text(state: &Arc<AppState>, text: &str) {
                     })
                     .await;
 
-                info!("client_ws: sent resume request for session {}", session_info.id);
+                info!(
+                    "client_ws: sent resume request for session {}",
+                    session_info.id
+                );
             }
 
             // Ask the client to discover and report available slash commands.
@@ -186,7 +189,11 @@ async fn handle_text(state: &Arc<AppState>, text: &str) {
         }
 
         // -------------------------------------------------------------------
-        C2S::SessionStarted { session_id, pid, cwd } => {
+        C2S::SessionStarted {
+            session_id,
+            pid,
+            cwd,
+        } => {
             info!(%session_id, %pid, %cwd, "client_ws: SessionStarted");
 
             let updated_info: Option<SessionInfo> = {
@@ -204,14 +211,14 @@ async fn handle_text(state: &Arc<AppState>, text: &str) {
 
             if let Some(info) = updated_info {
                 state.store.save_session(&info).await.ok();
-                state.broadcast(&S2D::SessionUpdated { session: info.clone() }).await;
+                state
+                    .broadcast(&S2D::SessionUpdated {
+                        session: info.clone(),
+                    })
+                    .await;
                 state
                     .ntfy
-                    .session_started(
-                        &session_id,
-                        info.name.as_deref(),
-                        &info.cwd,
-                    )
+                    .session_started(&session_id, info.name.as_deref(), &info.cwd)
                     .await;
             }
         }
@@ -249,14 +256,77 @@ async fn handle_text(state: &Arc<AppState>, text: &str) {
                 // Persist the event to the append-only log.
                 state.store.append_event(&session_id, &event).await.ok();
 
-                state
-                    .ntfy
-                    .on_event(&session_id, &event)
-                    .await;
+                state.ntfy.on_event(&session_id, &event).await;
                 state
                     .broadcast(&S2D::SessionEvent { session_id, event })
                     .await;
             }
+        }
+
+        // -------------------------------------------------------------------
+        C2S::ImportHistory { sessions } => {
+            let hostname = {
+                let guard = state.client.read().await;
+                guard.as_ref().map(|c| c.hostname.clone())
+            };
+
+            let mut imported = 0usize;
+
+            for hist in sessions {
+                // Skip if a session with this claude_session_id already exists.
+                let exists = {
+                    let guard = state.sessions.read().await;
+                    guard.values().any(|buf| {
+                        buf.info
+                            .claude_session_id
+                            .as_deref()
+                            .map_or(false, |id| id == hist.claude_session_id)
+                    })
+                };
+                if exists {
+                    continue;
+                }
+
+                let session_id = uuid::Uuid::new_v4().to_string();
+                let now = Utc::now();
+                let info = SessionInfo {
+                    id: session_id.clone(),
+                    name: None,
+                    cwd: hist.cwd,
+                    status: SessionStatus::Completed,
+                    created_at: hist.created_at.unwrap_or(now),
+                    started_at: hist.created_at,
+                    ended_at: hist.ended_at.or(hist.created_at).or(Some(now)),
+                    stats: SessionStats::default(),
+                    client_hostname: hostname.clone(),
+                    claude_session_id: Some(hist.claude_session_id),
+                };
+
+                state.store.save_session(&info).await.ok();
+                for event in &hist.events {
+                    state.store.append_event(&session_id, event).await.ok();
+                }
+
+                let events: std::collections::VecDeque<_> = hist.events.into_iter().collect();
+
+                {
+                    let mut guard = state.sessions.write().await;
+                    guard.insert(
+                        session_id.clone(),
+                        crate::state::SessionBuffer {
+                            info: info.clone(),
+                            events,
+                        },
+                    );
+                }
+
+                state
+                    .broadcast(&S2D::SessionCreated { session: info })
+                    .await;
+                imported += 1;
+            }
+
+            info!("client_ws: ImportHistory: imported {imported} new sessions");
         }
 
         // -------------------------------------------------------------------

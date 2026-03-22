@@ -517,6 +517,7 @@ dependencies = [
  "actix-web",
  "actix-ws",
  "anyhow",
+ "bytes",
  "chrono",
  "claude-shared",
  "futures-util",

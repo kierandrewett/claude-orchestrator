@@ -1,11 +1,12 @@
 mod connection;
+mod history_importer;
 mod protocol;
 mod session_runner;
 mod tray;
 
 use std::sync::{Arc, Mutex};
-use tray::TrayState;
 use tracing::info;
+use tray::TrayState;
 
 fn main() -> anyhow::Result<()> {
     // When running without a terminal (e.g. systemd/autostart), default to
@@ -23,10 +24,9 @@ fn main() -> anyhow::Result<()> {
     // Read required environment variables
     let server_url = std::env::var("SERVER_URL")
         .expect("SERVER_URL environment variable is required (ws:// or wss:// URL)");
-    let client_token = std::env::var("CLIENT_TOKEN")
-        .expect("CLIENT_TOKEN environment variable is required");
-    let claude_path =
-        std::env::var("CLAUDE_PATH").unwrap_or_else(|_| "claude".to_string());
+    let client_token =
+        std::env::var("CLIENT_TOKEN").expect("CLIENT_TOKEN environment variable is required");
+    let claude_path = std::env::var("CLAUDE_PATH").unwrap_or_else(|_| "claude".to_string());
 
     let default_cwd = std::env::var("DEFAULT_CWD").unwrap_or_else(|_| {
         dirs::home_dir()
@@ -56,8 +56,8 @@ fn main() -> anyhow::Result<()> {
         default_cwd,
     });
 
-    let dashboard_url = std::env::var("DASHBOARD_URL")
-        .unwrap_or_else(|_| "http://localhost:8080".to_string());
+    let dashboard_url =
+        std::env::var("DASHBOARD_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
 
     // Shared state between the tray UI and the connection background thread
     let tray_state = Arc::new(Mutex::new(TrayState {
@@ -78,16 +78,20 @@ fn main() -> anyhow::Result<()> {
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-        rt.block_on(connection::run_forever(config_clone, tray_state_bg, shutdown_rx_bg));
+        rt.block_on(connection::run_forever(
+            config_clone,
+            tray_state_bg,
+            shutdown_rx_bg,
+        ));
         info!("background tokio runtime exiting");
     });
 
     // Build tray on the main thread (required by GTK)
     let mut tray = tray::Tray::new(Arc::clone(&tray_state))?;
 
-    let open_id    = tray.open_id();
+    let open_id = tray.open_id();
     let restart_id = tray.restart_id();
-    let quit_id    = tray.quit_id();
+    let quit_id = tray.quit_id();
 
     // Register Ctrl-C / SIGTERM to trigger a clean shutdown
     let shutdown_tx_signal = shutdown_tx.clone();

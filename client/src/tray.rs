@@ -1,8 +1,7 @@
 use std::sync::{Arc, Mutex};
 use tray_icon::{
-    TrayIcon, TrayIconBuilder,
     menu::{Menu, MenuId, MenuItem, PredefinedMenuItem},
-    Icon,
+    Icon, TrayIcon, TrayIconBuilder,
 };
 
 // Claude icon extracted from claude.ai favicon — 32×32 raw RGBA
@@ -11,20 +10,20 @@ const ICON_SIZE: u32 = 32;
 
 #[derive(Debug, Clone, Default)]
 pub struct TrayState {
-    pub connected:       bool,
-    pub hostname:        Option<String>,
+    pub connected: bool,
+    pub hostname: Option<String>,
     pub active_sessions: usize,
-    pub dashboard_url:   String,
+    pub dashboard_url: String,
 }
 
 pub struct Tray {
-    icon:           TrayIcon,
-    state_item:     MenuItem,
-    sessions_item:  MenuItem,
-    open_item:      MenuItem,
-    restart_item:   MenuItem,
-    quit_item:      MenuItem,
-    last_count:     usize,
+    icon: TrayIcon,
+    state_item: MenuItem,
+    sessions_item: MenuItem,
+    open_item: MenuItem,
+    restart_item: MenuItem,
+    quit_item: MenuItem,
+    last_count: usize,
     last_connected: bool,
 }
 
@@ -35,11 +34,11 @@ impl Tray {
 
         let icon = make_icon(0, false);
 
-        let state_item    = MenuItem::new("Disconnected", false, None);
+        let state_item = MenuItem::new("Disconnected", false, None);
         let sessions_item = MenuItem::new("No active sessions", false, None);
-        let open_item     = MenuItem::new("Open Dashboard", true, None);
-        let restart_item  = MenuItem::new("Restart Orchestrator", true, None);
-        let quit_item     = MenuItem::new("Quit", true, None);
+        let open_item = MenuItem::new("Open Dashboard", true, None);
+        let restart_item = MenuItem::new("Restart Orchestrator", true, None);
+        let quit_item = MenuItem::new("Quit", true, None);
 
         let menu = Menu::new();
         menu.append_items(&[
@@ -79,7 +78,10 @@ impl Tray {
     pub fn update(&mut self, state: &TrayState) {
         // Status line
         let status = if state.connected {
-            format!("Connected — {}", state.hostname.as_deref().unwrap_or("homelab"))
+            format!(
+                "Connected — {}",
+                state.hostname.as_deref().unwrap_or("homelab")
+            )
         } else {
             "Disconnected".to_string()
         };
@@ -97,13 +99,21 @@ impl Tray {
         if state.active_sessions != self.last_count || state.connected != self.last_connected {
             self.last_count = state.active_sessions;
             self.last_connected = state.connected;
-            let _ = self.icon.set_icon(Some(make_icon(state.active_sessions, state.connected)));
+            let _ = self
+                .icon
+                .set_icon(Some(make_icon(state.active_sessions, state.connected)));
         }
     }
 
-    pub fn open_id(&self)    -> MenuId { self.open_item.id().clone() }
-    pub fn restart_id(&self) -> MenuId { self.restart_item.id().clone() }
-    pub fn quit_id(&self)    -> MenuId { self.quit_item.id().clone() }
+    pub fn open_id(&self) -> MenuId {
+        self.open_item.id().clone()
+    }
+    pub fn restart_id(&self) -> MenuId {
+        self.restart_item.id().clone()
+    }
+    pub fn quit_id(&self) -> MenuId {
+        self.quit_item.id().clone()
+    }
 }
 
 // ── Icon rendering ────────────────────────────────────────────────────────────
@@ -140,15 +150,23 @@ fn greyscale(pixels: &mut Vec<u8>) {
 /// Draw a red pill badge with a digit (or "9+") in the bottom-right corner.
 fn draw_badge(pixels: &mut Vec<u8>, w: u32, h: u32, count: usize) {
     let label: &[u8] = match count {
-        1 => b"1", 2 => b"2", 3 => b"3", 4 => b"4", 5 => b"5",
-        6 => b"6", 7 => b"7", 8 => b"8", 9 => b"9", _ => b"+",
+        1 => b"1",
+        2 => b"2",
+        3 => b"3",
+        4 => b"4",
+        5 => b"5",
+        6 => b"6",
+        7 => b"7",
+        8 => b"8",
+        9 => b"9",
+        _ => b"+",
     };
 
     // Badge is 11×11 px, anchored to bottom-right with 1px margin
     let badge_size: i32 = 11;
-    let bx = w as i32 - badge_size - 1;  // top-left x of badge
-    let by = h as i32 - badge_size - 1;  // top-left y of badge
-    let r  = badge_size / 2;
+    let bx = w as i32 - badge_size - 1; // top-left x of badge
+    let by = h as i32 - badge_size - 1; // top-left y of badge
+    let r = badge_size / 2;
     let cx = bx + r;
     let cy = by + r;
 
@@ -166,8 +184,8 @@ fn draw_badge(pixels: &mut Vec<u8>, w: u32, h: u32, count: usize) {
     // Single digit centred in the badge using a 3×5 bitmap font
     let glyph = digit_glyph(label[0]);
     // Centre the 3×5 glyph inside the 11×11 badge
-    let gx = cx - 1;  // left edge of glyph
-    let gy = cy - 2;  // top edge of glyph
+    let gx = cx - 1; // left edge of glyph
+    let gy = cy - 2; // top edge of glyph
     for (row, bits) in glyph.iter().enumerate() {
         for col in 0..3i32 {
             if (bits >> (2 - col)) & 1 == 1 {
@@ -201,6 +219,6 @@ fn digit_glyph(ch: u8) -> [u8; 5] {
         b'8' => [0b111, 0b101, 0b111, 0b101, 0b111],
         b'9' => [0b111, 0b101, 0b111, 0b001, 0b111],
         b'+' => [0b010, 0b010, 0b111, 0b010, 0b010],
-        _    => [0b000; 5],
+        _ => [0b000; 5],
     }
 }

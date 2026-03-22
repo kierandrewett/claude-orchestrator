@@ -1,1 +1,1 @@
-/// <reference types="vite/client" />
+// Replaced by src/global.d.ts

@@ -1,10 +1,10 @@
+use anyhow::Context;
+use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tokio::sync::{Mutex as TokioMutex, mpsc, broadcast};
+use tokio::sync::{broadcast, mpsc, Mutex as TokioMutex};
 use tokio_tungstenite::tungstenite::Message;
-use futures_util::{StreamExt, SinkExt};
-use anyhow::Context;
-use tracing::{info, warn, debug};
+use tracing::{debug, info, warn};
 
 use crate::protocol::{C2S, S2C};
 use crate::session_runner::{self, SessionConfig, WsSink};
@@ -83,9 +83,8 @@ async fn connect_and_run(
 
     // Build an HTTP upgrade request with the required WebSocket headers.
     // tungstenite does not inject these automatically when given a custom Request.
-    let uri: tokio_tungstenite::tungstenite::http::Uri = config.server_url
-        .parse()
-        .context("invalid SERVER_URL")?;
+    let uri: tokio_tungstenite::tungstenite::http::Uri =
+        config.server_url.parse().context("invalid SERVER_URL")?;
     let host = uri.host().unwrap_or("localhost").to_string();
     let host = match uri.port_u16() {
         Some(p) => format!("{host}:{p}"),
@@ -103,10 +102,9 @@ async fn connect_and_run(
         .body(())
         .context("failed to build HTTP upgrade request")?;
 
-    let (ws_stream, response) =
-        tokio_tungstenite::connect_async(request)
-            .await
-            .context("WebSocket connect failed")?;
+    let (ws_stream, response) = tokio_tungstenite::connect_async(request)
+        .await
+        .context("WebSocket connect failed")?;
 
     info!("connected (HTTP {})", response.status());
 
@@ -121,11 +119,23 @@ async fn connect_and_run(
     let ws_tx: Arc<TokioMutex<WsSink>> = Arc::new(TokioMutex::new(write));
 
     // Send Hello immediately
-    send_msg(&ws_tx, &C2S::Hello {
-        client_id: config.client_id.clone(),
-        hostname: config.hostname.clone(),
-    })
+    send_msg(
+        &ws_tx,
+        &C2S::Hello {
+            client_id: config.client_id.clone(),
+            hostname: config.hostname.clone(),
+        },
+    )
     .await;
+
+    // Import any historical Claude Code sessions in the background.
+    {
+        let config_clone = Arc::clone(config);
+        let ws_tx_clone = Arc::clone(&ws_tx);
+        tokio::spawn(async move {
+            crate::history_importer::run(config_clone, ws_tx_clone).await;
+        });
+    }
 
     let session_map: SessionMap = Arc::new(TokioMutex::new(HashMap::new()));
 
@@ -150,23 +160,21 @@ async fn connect_and_run(
                 .await;
             }
 
-            Message::Binary(bin) => {
-                match std::str::from_utf8(&bin) {
-                    Ok(text) => {
-                        handle_text_message(
-                            text,
-                            config,
-                            &ws_tx,
-                            &session_map,
-                            Arc::clone(&tray_state),
-                        )
-                        .await;
-                    }
-                    Err(_) => {
-                        warn!("received unexpected binary message, ignoring");
-                    }
+            Message::Binary(bin) => match std::str::from_utf8(&bin) {
+                Ok(text) => {
+                    handle_text_message(
+                        text,
+                        config,
+                        &ws_tx,
+                        &session_map,
+                        Arc::clone(&tray_state),
+                    )
+                    .await;
                 }
-            }
+                Err(_) => {
+                    warn!("received unexpected binary message, ignoring");
+                }
+            },
 
             Message::Ping(payload) => {
                 debug!("received ping, sending pong");
@@ -339,7 +347,13 @@ async fn ws_send(ws_tx: &Arc<TokioMutex<WsSink>>, msg: &C2S) {
 /// and parses the output to extract available slash commands.
 async fn discover_commands(claude_path: &str) -> Vec<claude_shared::SlashCommand> {
     let output = tokio::process::Command::new(claude_path)
-        .args(["-p", "/help", "--output-format", "json", "--dangerously-skip-permissions"])
+        .args([
+            "-p",
+            "/help",
+            "--output-format",
+            "json",
+            "--dangerously-skip-permissions",
+        ])
         .output()
         .await;
 
@@ -368,7 +382,10 @@ fn parse_slash_commands(text: &str) -> Vec<claude_shared::SlashCommand> {
             let name = name.trim().to_string();
             let desc = desc.trim().to_string();
             if name.starts_with('/') && !name.contains(' ') {
-                commands.push(claude_shared::SlashCommand { name, description: desc });
+                commands.push(claude_shared::SlashCommand {
+                    name,
+                    description: desc,
+                });
             }
         } else {
             // Just the command name, no description

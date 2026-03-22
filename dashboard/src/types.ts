@@ -19,6 +19,7 @@ export interface SessionInfo {
     ended_at?: string;
     stats: SessionStats;
     client_hostname?: string;
+    claude_session_id?: string;
 }
 
 export interface SlashCommand {
@@ -29,7 +30,7 @@ export interface SlashCommand {
 // Raw Claude NDJSON event - pass through without schema
 export type ClaudeEvent = Record<string, unknown>;
 
-// Discriminated union for all server→dashboard messages
+// Server→Dashboard SSE events (same discriminated union as before)
 export type S2DMessage =
     | { type: 'session_list'; sessions: SessionInfo[] }
     | { type: 'session_created'; session: SessionInfo }
@@ -40,9 +41,3 @@ export type S2DMessage =
     | { type: 'client_status'; connected: boolean; hostname: string | null }
     | { type: 'command_list'; commands: SlashCommand[] }
     | { type: 'error'; message: string };
-
-export type D2SMessage =
-    | { type: 'create_session'; name?: string; initial_prompt?: string }
-    | { type: 'send_input'; session_id: string; text: string }
-    | { type: 'kill_session'; session_id: string }
-    | { type: 'get_history'; session_id: string };

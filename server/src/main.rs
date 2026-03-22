@@ -1,5 +1,5 @@
 mod client_ws;
-mod dashboard_ws;
+mod dashboard_api;
 mod ntfy;
 mod persist;
 mod protocol;
@@ -27,16 +27,13 @@ async fn health(state: web::Data<Arc<AppState>>) -> HttpResponse {
         let guard = state.sessions.read().await;
         guard.len()
     };
-    let dashboard_count = {
-        let guard = state.dashboards.read().await;
-        guard.len()
-    };
+    let sse_subscribers = state.sse_tx.receiver_count();
 
     HttpResponse::Ok().json(serde_json::json!({
         "status": "ok",
         "client_connected": client_connected,
         "session_count": session_count,
-        "dashboard_count": dashboard_count,
+        "sse_subscribers": sse_subscribers,
     }))
 }
 
@@ -46,7 +43,6 @@ async fn health(state: web::Data<Arc<AppState>>) -> HttpResponse {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    // Initialise tracing with RUST_LOG env filter (default: info).
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -75,23 +71,41 @@ async fn main() -> std::io::Result<()> {
 
         App::new()
             .app_data(web::Data::new(state))
-            // WebSocket endpoints
+            // Client daemon WebSocket
             .route("/ws/client", web::get().to(client_ws::handler))
-            .route("/ws/dashboard", web::get().to(dashboard_ws::handler))
+            // Dashboard REST + SSE API
+            .route("/api/events", web::get().to(dashboard_api::sse_events))
+            .route("/api/status", web::get().to(dashboard_api::get_status))
+            .route("/api/sessions", web::get().to(dashboard_api::list_sessions))
+            .route(
+                "/api/sessions",
+                web::post().to(dashboard_api::create_session),
+            )
+            .route(
+                "/api/sessions/{id}/history",
+                web::get().to(dashboard_api::get_history),
+            )
+            .route(
+                "/api/sessions/{id}/input",
+                web::post().to(dashboard_api::send_input),
+            )
+            .route(
+                "/api/sessions/{id}",
+                web::delete().to(dashboard_api::kill_session),
+            )
             // Health check
             .route("/health", web::get().to(health))
-            // Static files (dashboard UI) — served last so routes above take priority
+            // Static files (dashboard UI)
             .service(
                 Files::new("/", "./static")
                     .index_file("index.html")
-                    .default_handler(
-                        web::get().to(|req: actix_web::HttpRequest, _state: web::Data<Arc<AppState>>| async move {
-                            // SPA fallback - serve index.html for any unknown route
+                    .default_handler(web::get().to(
+                        |req: actix_web::HttpRequest, _state: web::Data<Arc<AppState>>| async move {
                             actix_files::NamedFile::open("./static/index.html")
                                 .map(|f| f.into_response(&req))
                                 .unwrap_or_else(|_| HttpResponse::NotFound().finish())
-                        })
-                    )
+                        },
+                    )),
             )
     })
     .bind(&bind_addr)?

@@ -1,28 +1,26 @@
+use futures_util::SinkExt;
+use std::process::Stdio;
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use std::process::Stdio;
-use futures_util::SinkExt;
+use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};
 
-use crate::protocol::{C2S, S2C, SessionStats};
+use crate::protocol::{SessionStats, C2S, S2C};
 
 pub struct SessionConfig {
-    pub session_id:        String,
-    pub initial_prompt:    Option<String>,
-    pub extra_args:        Vec<String>,
-    pub claude_path:       String,
-    pub claude_session_id: String,   // pre-generated UUID for --session-id or --resume
-    pub is_resume:         bool,     // true = use --resume, false = use --session-id
-    pub default_cwd:       String,   // working directory for spawning claude
+    pub session_id: String,
+    pub initial_prompt: Option<String>,
+    pub extra_args: Vec<String>,
+    pub claude_path: String,
+    pub claude_session_id: String, // pre-generated UUID for --session-id or --resume
+    pub is_resume: bool,           // true = use --resume, false = use --session-id
+    pub default_cwd: String,       // working directory for spawning claude
 }
 
 /// Type alias for the write-half of a tokio-tungstenite WebSocket stream.
 pub type WsSink = futures_util::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tokio_tungstenite::tungstenite::Message,
 >;
 
@@ -34,7 +32,10 @@ pub async fn run_session(
     mut cmd_rx: mpsc::Receiver<S2C>,
 ) {
     let session_id = config.session_id.clone();
-    info!("session {session_id}: starting in cwd={}", config.default_cwd);
+    info!(
+        "session {session_id}: starting in cwd={}",
+        config.default_cwd
+    );
 
     // -------------------------------------------------------------------------
     // 1. Build and spawn the Claude child process
@@ -259,9 +260,7 @@ pub async fn run_session(
     // 8. Wait for the child to fully exit and collect the exit code
     // -------------------------------------------------------------------------
     let exit_code = match child.wait().await {
-        Ok(status) => {
-            status.code().unwrap_or(-1)
-        }
+        Ok(status) => status.code().unwrap_or(-1),
         Err(e) => {
             warn!("session {session_id}: wait() error: {e}");
             -1
@@ -292,9 +291,7 @@ fn format_user_message(text: &str) -> String {
     // are properly escaped inside the JSON output.
     let content_json = serde_json::to_string(text).unwrap_or_else(|_| format!("{text:?}"));
     // content_json is already a valid JSON string literal (with surrounding quotes).
-    format!(
-        "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":{content_json}}}}}\n"
-    )
+    format!("{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":{content_json}}}}}\n")
 }
 
 // -----------------------------------------------------------------------------
@@ -316,10 +313,7 @@ fn update_stats(stats: &mut SessionStats, event: &serde_json::Value) {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             stats.output_tokens += tokens;
-            if let Some(reason) = event
-                .pointer("/delta/stop_reason")
-                .and_then(|r| r.as_str())
-            {
+            if let Some(reason) = event.pointer("/delta/stop_reason").and_then(|r| r.as_str()) {
                 stats.stop_reason = Some(reason.to_string());
             }
         }
@@ -347,10 +341,7 @@ fn update_stats(stats: &mut SessionStats, event: &serde_json::Value) {
         }
         "assistant" => {
             // turn-complete format: scan content array for tool_use blocks
-            if let Some(content) = event
-                .pointer("/message/content")
-                .and_then(|c| c.as_array())
-            {
+            if let Some(content) = event.pointer("/message/content").and_then(|c| c.as_array()) {
                 for block in content {
                     if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
                         if let Some(name) = block.get("name").and_then(|n| n.as_str()) {
@@ -371,9 +362,9 @@ async fn ws_send(ws_tx: &Mutex<WsSink>, msg: &C2S) {
     match serde_json::to_string(msg) {
         Ok(json) => {
             let mut sink = ws_tx.lock().await;
-            if let Err(e) =
-                sink.send(tokio_tungstenite::tungstenite::Message::Text(json))
-                    .await
+            if let Err(e) = sink
+                .send(tokio_tungstenite::tungstenite::Message::Text(json))
+                .await
             {
                 warn!("ws_send error: {e}");
             }

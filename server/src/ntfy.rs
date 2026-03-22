@@ -21,25 +21,25 @@ impl Phase {
         match self {
             Phase::Starting => "🚀",
             Phase::Thinking => "🧠",
-            Phase::Reading  => "📂",
-            Phase::Writing  => "✍️",
-            Phase::Running  => "⚙️",
+            Phase::Reading => "📂",
+            Phase::Writing => "✍️",
+            Phase::Running => "⚙️",
         }
     }
     fn label(&self) -> &'static str {
         match self {
             Phase::Starting => "Starting",
             Phase::Thinking => "Thinking",
-            Phase::Reading  => "Reading",
-            Phase::Writing  => "Writing",
-            Phase::Running  => "Running",
+            Phase::Reading => "Reading",
+            Phase::Writing => "Writing",
+            Phase::Running => "Running",
         }
     }
 }
 
 struct SessionActivity {
     phase: Phase,
-    targets: Vec<String>,       // accumulated targets for current phase
+    targets: Vec<String>, // accumulated targets for current phase
     last_target: Option<String>,
     last_sent: Instant,
     input_tokens: u64,
@@ -109,11 +109,11 @@ impl SessionActivity {
 }
 
 pub struct NtfyManager {
-    url:        String,
-    token:      Option<String>,
+    url: String,
+    token: Option<String>,
     public_url: String,
-    client:     reqwest::Client,
-    sessions:   Mutex<HashMap<String, SessionActivity>>,
+    client: reqwest::Client,
+    sessions: Mutex<HashMap<String, SessionActivity>>,
 }
 
 impl NtfyManager {
@@ -259,10 +259,7 @@ impl NtfyManager {
 // ---------------------------------------------------------------------------
 
 fn detect_phase(event: &serde_json::Value) -> (Option<Phase>, Option<String>) {
-    let event_type = event
-        .get("type")
-        .and_then(|t| t.as_str())
-        .unwrap_or("");
+    let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
     // Streaming format: content_block_start with tool_use
     if event_type == "content_block_start" {
@@ -288,16 +285,10 @@ fn detect_phase(event: &serde_json::Value) -> (Option<Phase>, Option<String>) {
 
     // Turn-complete format: assistant message with content blocks
     if event_type == "assistant" {
-        if let Some(content) = event
-            .pointer("/message/content")
-            .and_then(|c| c.as_array())
-        {
+        if let Some(content) = event.pointer("/message/content").and_then(|c| c.as_array()) {
             for block in content {
                 if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                    let name = block
-                        .get("name")
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("");
+                    let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
                     let input = block.get("input").unwrap_or(&serde_json::Value::Null);
                     return tool_to_phase(name, input);
                 }
@@ -310,11 +301,11 @@ fn detect_phase(event: &serde_json::Value) -> (Option<Phase>, Option<String>) {
 
 fn tool_to_phase(name: &str, input: &serde_json::Value) -> (Option<Phase>, Option<String>) {
     let (phase, key) = match name {
-        "Read" | "Glob" | "Grep"        => (Phase::Reading, Some("file_path")),
-        "Write" | "Edit" | "MultiEdit"  => (Phase::Writing, Some("file_path")),
-        "Bash"                           => (Phase::Running, Some("command")),
-        "Agent"                          => (Phase::Thinking, None),
-        "WebFetch" | "WebSearch"         => (Phase::Running, Some("url")),
+        "Read" | "Glob" | "Grep" => (Phase::Reading, Some("file_path")),
+        "Write" | "Edit" | "MultiEdit" => (Phase::Writing, Some("file_path")),
+        "Bash" => (Phase::Running, Some("command")),
+        "Agent" => (Phase::Thinking, None),
+        "WebFetch" | "WebSearch" => (Phase::Running, Some("url")),
         _ => return (None, None),
     };
 
