@@ -352,32 +352,78 @@ async fn ws_send(ws_tx: &Arc<TokioMutex<WsSink>>, msg: &C2S) {
     send_msg(ws_tx, msg).await;
 }
 
-/// Runs `claude -p "/help" --output-format json --dangerously-skip-permissions`
-/// and parses the output to extract available slash commands.
-async fn discover_commands(claude_path: &str) -> Vec<claude_shared::SlashCommand> {
-    let output = tokio::process::Command::new(claude_path)
-        .args([
-            "-p",
-            "/help",
-            "--output-format",
-            "json",
-            "--dangerously-skip-permissions",
-        ])
-        .output()
-        .await;
-
-    let output = match output {
-        Ok(o) => o,
-        Err(e) => {
-            warn!("Failed to discover claude commands: {e}");
-            return vec![];
-        }
+/// Discovers available slash commands by scanning Claude's commands directories:
+///   ~/.claude/commands/   (user-level)
+///   .claude/commands/     (project-level, relative to default_cwd — unused here
+///                          since we don't have cwd at discovery time)
+///
+/// Each `.md` file becomes a command named `/<stem>`. The description is read
+/// from a YAML frontmatter `description:` field, or falls back to the first
+/// non-empty content line.
+///
+/// Previously this ran `claude -p "/help"` which broke in newer Claude Code
+/// versions that treat `/help` as a skill invocation and output "Unknown skill: help".
+async fn discover_commands(_claude_path: &str) -> Vec<claude_shared::SlashCommand> {
+    let Some(home) = dirs::home_dir() else {
+        return vec![];
     };
 
-    let text = String::from_utf8_lossy(&output.stdout);
-    parse_slash_commands(&text)
+    let commands_dir = home.join(".claude").join("commands");
+    let mut read_dir = match tokio::fs::read_dir(&commands_dir).await {
+        Ok(d) => d,
+        Err(_) => return vec![], // directory doesn't exist — no custom commands
+    };
+
+    let mut commands = Vec::new();
+    while let Ok(Some(entry)) = read_dir.next_entry().await {
+        let path = entry.path();
+        if path.extension().map_or(false, |e| e == "md") {
+            let stem = path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let name = format!("/{stem}");
+            let description = read_command_description(&path).await;
+            commands.push(claude_shared::SlashCommand { name, description });
+        }
+    }
+
+    commands
 }
 
+/// Reads the description of a slash command from a `.md` file.
+/// Checks YAML frontmatter (`description: ...`) first, then falls back to
+/// the first non-empty, non-heading line of content.
+async fn read_command_description(path: &std::path::Path) -> String {
+    let Ok(content) = tokio::fs::read_to_string(path).await else {
+        return String::new();
+    };
+
+    // Parse YAML frontmatter between the first pair of `---` delimiters.
+    if let Some(rest) = content.strip_prefix("---") {
+        if let Some(end) = rest.find("---") {
+            for line in rest[..end].lines() {
+                if let Some(val) = line.strip_prefix("description:") {
+                    return val.trim().trim_matches('"').trim_matches('\'').to_string();
+                }
+            }
+        }
+    }
+
+    // Fallback: first non-empty line that isn't a YAML fence or Markdown heading.
+    for line in content.lines() {
+        let l = line.trim().trim_start_matches('#').trim();
+        if !l.is_empty() && l != "---" {
+            return l.chars().take(120).collect();
+        }
+    }
+
+    String::new()
+}
+
+// Dead code kept to avoid breaking callers if re-enabled later.
+#[allow(dead_code)]
 fn parse_slash_commands(text: &str) -> Vec<claude_shared::SlashCommand> {
     let mut commands = Vec::new();
     for line in text.lines() {
