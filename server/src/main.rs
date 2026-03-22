@@ -51,6 +51,7 @@ async fn main() -> std::io::Result<()> {
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
+        .with_writer(std::io::stderr)
         .init();
 
     let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
