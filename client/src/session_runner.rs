@@ -399,48 +399,37 @@ fn format_user_message(text: &str) -> String {
 // -----------------------------------------------------------------------------
 fn update_stats(stats: &mut SessionStats, event: &serde_json::Value) {
     let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
-    match event_type {
-        "message_start" => {
-            let tokens = event
-                .pointer("/message/usage/input_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            stats.input_tokens += tokens;
+
+    // With --include-partial-messages, Anthropic streaming events are wrapped
+    // in a stream_event envelope — recurse into the inner event.
+    if event_type == "stream_event" {
+        if let Some(inner) = event.get("event") {
+            update_stats(stats, inner);
         }
+        return;
+    }
+
+    match event_type {
         "message_delta" => {
-            let tokens = event
-                .pointer("/usage/output_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            stats.output_tokens += tokens;
             if let Some(reason) = event.pointer("/delta/stop_reason").and_then(|r| r.as_str()) {
                 stats.stop_reason = Some(reason.to_string());
             }
         }
-        "content_block_start" => {
-            if event
-                .pointer("/content_block/type")
-                .and_then(|t| t.as_str())
-                == Some("tool_use")
-            {
-                if let Some(name) = event
-                    .pointer("/content_block/name")
-                    .and_then(|n| n.as_str())
-                {
-                    *stats.tool_calls.entry(name.to_string()).or_insert(0) += 1;
-                }
-            }
-        }
-        "result" => {
-            if let Some(cost) = event.get("cost_usd").and_then(|c| c.as_f64()) {
-                stats.cost_usd = Some(cost);
-            }
-            if let Some(turns) = event.get("num_turns").and_then(|t| t.as_u64()) {
-                stats.turns = turns as u32;
-            }
-        }
         "assistant" => {
-            // turn-complete format: scan content array for tool_use blocks
+            // Accumulate per-turn token usage.
+            if let Some(tokens) = event
+                .pointer("/message/usage/input_tokens")
+                .and_then(|v| v.as_u64())
+            {
+                stats.input_tokens = stats.input_tokens.saturating_add(tokens);
+            }
+            if let Some(tokens) = event
+                .pointer("/message/usage/output_tokens")
+                .and_then(|v| v.as_u64())
+            {
+                stats.output_tokens = stats.output_tokens.saturating_add(tokens);
+            }
+            // Scan content array for tool_use blocks.
             if let Some(content) = event.pointer("/message/content").and_then(|c| c.as_array()) {
                 for block in content {
                     if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
@@ -449,6 +438,22 @@ fn update_stats(stats: &mut SessionStats, event: &serde_json::Value) {
                         }
                     }
                 }
+            }
+        }
+        "result" => {
+            // Authoritative final cost — field changed to total_cost_usd in Claude Code 2.x.
+            if let Some(cost) = event.get("total_cost_usd").and_then(|c| c.as_f64()) {
+                stats.cost_usd = Some(cost);
+            }
+            // Authoritative final token totals override accumulated per-turn counts.
+            if let Some(tokens) = event.pointer("/usage/input_tokens").and_then(|v| v.as_u64()) {
+                stats.input_tokens = tokens;
+            }
+            if let Some(tokens) = event.pointer("/usage/output_tokens").and_then(|v| v.as_u64()) {
+                stats.output_tokens = tokens;
+            }
+            if let Some(turns) = event.get("num_turns").and_then(|t| t.as_u64()) {
+                stats.turns = turns as u32;
             }
         }
         _ => {}

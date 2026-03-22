@@ -162,61 +162,75 @@ impl AppState {
     // update_stats — parse a raw Claude NDJSON event and mutate SessionStats
     // -----------------------------------------------------------------------
     pub fn update_stats(stats: &mut SessionStats, event: &serde_json::Value) {
-        if event.get("type").and_then(|t| t.as_str()) == Some("message_start") {
-            if let Some(tokens) = event
-                .pointer("/message/usage/input_tokens")
-                .and_then(|v| v.as_u64())
-            {
-                stats.input_tokens = stats.input_tokens.saturating_add(tokens);
+        let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        // With --include-partial-messages, Anthropic streaming events are wrapped
+        // in a stream_event envelope — recurse into the inner event.
+        if event_type == "stream_event" {
+            if let Some(inner) = event.get("event") {
+                Self::update_stats(stats, inner);
             }
+            return;
         }
 
-        if event.get("type").and_then(|t| t.as_str()) == Some("message_delta") {
-            if let Some(tokens) = event
-                .pointer("/usage/output_tokens")
-                .and_then(|v| v.as_u64())
-            {
-                stats.output_tokens = stats.output_tokens.saturating_add(tokens);
-            }
-            if let Some(reason) = event.pointer("/delta/stop_reason").and_then(|v| v.as_str()) {
-                stats.stop_reason = Some(reason.to_string());
-            }
-        }
-
-        if event.get("type").and_then(|t| t.as_str()) == Some("content_block_start") {
-            if event
-                .pointer("/content_block/type")
-                .and_then(|v| v.as_str())
-                == Some("tool_use")
-            {
-                if let Some(tool_name) = event
-                    .pointer("/content_block/name")
-                    .and_then(|v| v.as_str())
+        match event_type {
+            "message_delta" => {
+                if let Some(reason) =
+                    event.pointer("/delta/stop_reason").and_then(|v| v.as_str())
                 {
-                    *stats.tool_calls.entry(tool_name.to_string()).or_insert(0) += 1;
+                    stats.stop_reason = Some(reason.to_string());
                 }
             }
-        }
-
-        if event.get("type").and_then(|t| t.as_str()) == Some("assistant") {
-            if let Some(content) = event.get("content").and_then(|c| c.as_array()) {
-                for block in content {
-                    if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                        if let Some(tool_name) = block.get("name").and_then(|v| v.as_str()) {
-                            *stats.tool_calls.entry(tool_name.to_string()).or_insert(0) += 1;
+            "assistant" => {
+                // Accumulate per-turn token usage.
+                if let Some(tokens) = event
+                    .pointer("/message/usage/input_tokens")
+                    .and_then(|v| v.as_u64())
+                {
+                    stats.input_tokens = stats.input_tokens.saturating_add(tokens);
+                }
+                if let Some(tokens) = event
+                    .pointer("/message/usage/output_tokens")
+                    .and_then(|v| v.as_u64())
+                {
+                    stats.output_tokens = stats.output_tokens.saturating_add(tokens);
+                }
+                // Scan content array for tool_use blocks.
+                if let Some(content) =
+                    event.pointer("/message/content").and_then(|c| c.as_array())
+                {
+                    for block in content {
+                        if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                            if let Some(tool_name) =
+                                block.get("name").and_then(|v| v.as_str())
+                            {
+                                *stats.tool_calls.entry(tool_name.to_string()).or_insert(0) += 1;
+                            }
                         }
                     }
                 }
             }
-        }
-
-        if event.get("type").and_then(|t| t.as_str()) == Some("result") {
-            if let Some(cost) = event.get("cost_usd").and_then(|v| v.as_f64()) {
-                stats.cost_usd = Some(stats.cost_usd.unwrap_or(0.0) + cost);
+            "result" => {
+                // Authoritative final cost — field changed to total_cost_usd in Claude Code 2.x.
+                if let Some(cost) = event.get("total_cost_usd").and_then(|v| v.as_f64()) {
+                    stats.cost_usd = Some(cost);
+                }
+                // Authoritative final token totals override accumulated per-turn counts.
+                if let Some(tokens) =
+                    event.pointer("/usage/input_tokens").and_then(|v| v.as_u64())
+                {
+                    stats.input_tokens = tokens;
+                }
+                if let Some(tokens) =
+                    event.pointer("/usage/output_tokens").and_then(|v| v.as_u64())
+                {
+                    stats.output_tokens = tokens;
+                }
+                if let Some(turns) = event.get("num_turns").and_then(|v| v.as_u64()) {
+                    stats.turns = turns as u32;
+                }
             }
-            if let Some(turns) = event.get("num_turns").and_then(|v| v.as_u64()) {
-                stats.turns = turns as u32;
-            }
+            _ => {}
         }
     }
 }

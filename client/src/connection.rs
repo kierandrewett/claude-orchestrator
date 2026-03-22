@@ -1,7 +1,9 @@
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc, Mutex as TokioMutex};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
@@ -352,78 +354,88 @@ async fn ws_send(ws_tx: &Arc<TokioMutex<WsSink>>, msg: &C2S) {
     send_msg(ws_tx, msg).await;
 }
 
-/// Discovers available slash commands by scanning Claude's commands directories:
-///   ~/.claude/commands/   (user-level)
-///   .claude/commands/     (project-level, relative to default_cwd — unused here
-///                          since we don't have cwd at discovery time)
-///
-/// Each `.md` file becomes a command named `/<stem>`. The description is read
-/// from a YAML frontmatter `description:` field, or falls back to the first
-/// non-empty content line.
-///
-/// Previously this ran `claude -p "/help"` which broke in newer Claude Code
-/// versions that treat `/help` as a skill invocation and output "Unknown skill: help".
-async fn discover_commands(_claude_path: &str) -> Vec<claude_shared::SlashCommand> {
-    let Some(home) = dirs::home_dir() else {
-        return vec![];
-    };
+/// Discovers available slash commands by spawning Claude Code with stream-json
+/// and sending `/help`, then parsing the text response for slash command names
+/// and descriptions.
+async fn discover_commands(claude_path: &str) -> Vec<claude_shared::SlashCommand> {
+    let mut cmd = tokio::process::Command::new(claude_path);
+    cmd.args([
+        "--print",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--dangerously-skip-permissions",
+    ])
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .kill_on_drop(true);
 
-    let commands_dir = home.join(".claude").join("commands");
-    let mut read_dir = match tokio::fs::read_dir(&commands_dir).await {
-        Ok(d) => d,
-        Err(_) => return vec![], // directory doesn't exist — no custom commands
-    };
-
-    let mut commands = Vec::new();
-    while let Ok(Some(entry)) = read_dir.next_entry().await {
-        let path = entry.path();
-        if path.extension().map_or(false, |e| e == "md") {
-            let stem = path
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            let name = format!("/{stem}");
-            let description = read_command_description(&path).await;
-            commands.push(claude_shared::SlashCommand { name, description });
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("discover_commands: failed to spawn claude: {e}");
+            return vec![];
         }
-    }
-
-    commands
-}
-
-/// Reads the description of a slash command from a `.md` file.
-/// Checks YAML frontmatter (`description: ...`) first, then falls back to
-/// the first non-empty, non-heading line of content.
-async fn read_command_description(path: &std::path::Path) -> String {
-    let Ok(content) = tokio::fs::read_to_string(path).await else {
-        return String::new();
     };
 
-    // Parse YAML frontmatter between the first pair of `---` delimiters.
-    if let Some(rest) = content.strip_prefix("---") {
-        if let Some(end) = rest.find("---") {
-            for line in rest[..end].lines() {
-                if let Some(val) = line.strip_prefix("description:") {
-                    return val.trim().trim_matches('"').trim_matches('\'').to_string();
+    let mut stdin = child.stdin.take().expect("stdin was piped");
+    let stdout = child.stdout.take().expect("stdout was piped");
+
+    let help_msg = concat!(
+        r#"{"type":"user","message":{"role":"user","content":"/help"}}"#,
+        "\n"
+    );
+    if let Err(e) = stdin.write_all(help_msg.as_bytes()).await {
+        warn!("discover_commands: stdin write error: {e}");
+        return vec![];
+    }
+    drop(stdin); // signal EOF so claude knows there's no more input
+
+    let mut lines = BufReader::new(stdout).lines();
+    let mut full_text = String::new();
+
+    let read_fut = async {
+        while let Ok(Some(line)) = lines.next_line().await {
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            match event.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                "content_block_delta" => {
+                    if let Some(text) = event.pointer("/delta/text").and_then(|t| t.as_str()) {
+                        full_text.push_str(text);
+                    }
                 }
+                "result" => {
+                    if let Some(text) = event.get("result").and_then(|t| t.as_str()) {
+                        if full_text.is_empty() {
+                            full_text = text.to_string();
+                        }
+                    }
+                    break;
+                }
+                _ => {}
             }
         }
-    }
+    };
 
-    // Fallback: first non-empty line that isn't a YAML fence or Markdown heading.
-    for line in content.lines() {
-        let l = line.trim().trim_start_matches('#').trim();
-        if !l.is_empty() && l != "---" {
-            return l.chars().take(120).collect();
+    match tokio::time::timeout(std::time::Duration::from_secs(30), read_fut).await {
+        Ok(()) => {}
+        Err(_) => {
+            warn!("discover_commands: timed out waiting for /help response");
+            let _ = child.kill().await;
         }
     }
+    let _ = child.wait().await;
 
-    String::new()
+    if full_text.is_empty() {
+        return vec![];
+    }
+
+    parse_slash_commands(&full_text)
 }
 
-// Dead code kept to avoid breaking callers if re-enabled later.
-#[allow(dead_code)]
 fn parse_slash_commands(text: &str) -> Vec<claude_shared::SlashCommand> {
     let mut commands = Vec::new();
     for line in text.lines() {
