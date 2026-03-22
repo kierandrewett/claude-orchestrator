@@ -291,6 +291,15 @@ async fn handle_text_message(
             let _ = text;
         }
 
+        S2C::SendInputWithFiles {
+            ref session_id,
+            ref files,
+            ..
+        } => {
+            debug!("SendInputWithFiles: session_id={session_id}, files={}", files.len());
+            route_to_session(session_map, session_id, msg.clone()).await;
+        }
+
         S2C::KillSession { ref session_id } => {
             info!("KillSession: session_id={session_id}");
             route_to_session(session_map, session_id, msg.clone()).await;

@@ -89,6 +89,18 @@ pub enum C2S {
     },
 }
 
+/// A file attached to a message, transferred from the Telegram bot to the client
+/// daemon as base64-encoded content so it can be fed to Claude.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachedFile {
+    /// Original filename (e.g. "photo.jpg", "report.pdf").
+    pub filename: String,
+    /// MIME type (e.g. "image/jpeg", "application/pdf", "text/plain").
+    pub mime_type: String,
+    /// Base64-encoded file content (standard alphabet, padded).
+    pub data_base64: String,
+}
+
 /// Server → Client daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -103,6 +115,14 @@ pub enum S2C {
     SendInput {
         session_id: String,
         text: String,
+    },
+    /// Like SendInput but carries attached files (images, PDFs, other) to be
+    /// forwarded to Claude as multimodal content blocks.
+    SendInputWithFiles {
+        session_id: String,
+        /// The message text / caption (may be empty if attachment-only).
+        text: String,
+        files: Vec<AttachedFile>,
     },
     KillSession {
         session_id: String,

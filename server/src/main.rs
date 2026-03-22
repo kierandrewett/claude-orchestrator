@@ -89,6 +89,9 @@ async fn main() -> std::io::Result<()> {
 
         App::new()
             .app_data(web::Data::new(state))
+            // Increase WebSocket payload limit to 128 MB so large Claude events
+            // (file reads, big outputs) don't drop the client connection.
+            .app_data(web::PayloadConfig::default().limit(128 * 1024 * 1024))
             // Client daemon WebSocket
             .route("/ws/client", web::get().to(client_ws::handler))
             // Dashboard REST + SSE API

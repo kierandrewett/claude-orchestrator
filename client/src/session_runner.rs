@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures_util::SinkExt;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -6,7 +7,7 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};
 
-use crate::protocol::{SessionStats, C2S, S2C};
+use crate::protocol::{AttachedFile, SessionStats, C2S, S2C};
 
 pub struct SessionConfig {
     pub session_id: String,
@@ -187,6 +188,15 @@ pub async fn run_session(
                             warn!("session {session_id}: could not forward input to stdin task: {e}");
                         }
                     }
+                    Some(S2C::SendInputWithFiles { text, files, .. }) => {
+                        debug!("session {session_id}: received SendInputWithFiles ({} file(s))", files.len());
+                        let formatted = format_user_message_with_files(&text, &files).await;
+                        if !formatted.is_empty() {
+                            if let Err(e) = stdin_tx.send(formatted).await {
+                                warn!("session {session_id}: could not forward files to stdin task: {e}");
+                            }
+                        }
+                    }
                     Some(S2C::KillSession { .. }) => {
                         info!("session {session_id}: KillSession received, killing child");
                         if let Err(e) = child.kill().await {
@@ -282,6 +292,95 @@ pub async fn run_session(
         },
     )
     .await;
+}
+
+// -----------------------------------------------------------------------------
+// Helper: format a user message with attached files for Claude's stream-json
+// stdin format. Images and PDFs are embedded as base64 content blocks;
+// other file types are saved to /tmp/telegram_attachments/ and referenced
+// by path so Claude can read them with its Read tool.
+// -----------------------------------------------------------------------------
+async fn format_user_message_with_files(text: &str, files: &[AttachedFile]) -> String {
+    let mut blocks: Vec<serde_json::Value> = Vec::new();
+    let mut saved_paths: Vec<String> = Vec::new();
+
+    for file in files {
+        if file.mime_type.starts_with("image/") {
+            // Claude supports image/jpeg, image/png, image/gif, image/webp.
+            let media_type = match file.mime_type.as_str() {
+                "image/jpeg" | "image/png" | "image/gif" | "image/webp" => {
+                    file.mime_type.clone()
+                }
+                _ => "image/jpeg".to_string(),
+            };
+            blocks.push(serde_json::json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": file.data_base64
+                }
+            }));
+        } else if file.mime_type == "application/pdf" {
+            blocks.push(serde_json::json!({
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": file.data_base64
+                }
+            }));
+        } else {
+            // For other file types: decode and save to disk, tell Claude the path.
+            let save_dir = std::path::Path::new("/tmp/telegram_attachments");
+            if let Err(e) = tokio::fs::create_dir_all(save_dir).await {
+                warn!("format_user_message_with_files: failed to create dir: {e}");
+                continue;
+            }
+            let path = save_dir.join(&file.filename);
+            match STANDARD.decode(&file.data_base64) {
+                Ok(bytes) => {
+                    if let Err(e) = tokio::fs::write(&path, &bytes).await {
+                        warn!("format_user_message_with_files: failed to write {}: {e}", file.filename);
+                    } else {
+                        saved_paths.push(path.display().to_string());
+                    }
+                }
+                Err(e) => {
+                    warn!("format_user_message_with_files: base64 decode error for {}: {e}", file.filename);
+                }
+            }
+        }
+    }
+
+    // Build the text portion, appending any saved file paths.
+    let mut full_text = text.to_string();
+    if !saved_paths.is_empty() {
+        if !full_text.is_empty() {
+            full_text.push('\n');
+        }
+        full_text.push_str("Attached file(s) available at: ");
+        full_text.push_str(&saved_paths.join(", "));
+    }
+
+    if !full_text.is_empty() {
+        blocks.push(serde_json::json!({ "type": "text", "text": full_text }));
+    }
+
+    if blocks.is_empty() {
+        return String::new();
+    }
+
+    // Plain text-only — use the simple string format for clarity.
+    if blocks.len() == 1 {
+        if let Some(t) = blocks[0].get("text").and_then(|v| v.as_str()) {
+            return format_user_message(t);
+        }
+    }
+
+    let content_json =
+        serde_json::to_string(&blocks).unwrap_or_else(|_| r#""[serialisation error]""#.to_string());
+    format!("{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":{content_json}}}}}\n")
 }
 
 // -----------------------------------------------------------------------------

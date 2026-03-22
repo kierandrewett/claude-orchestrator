@@ -16,12 +16,17 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
 use teloxide::{
+    net::Download,
     prelude::*,
     types::{MessageId, ParseMode, ReactionType, ReplyParameters},
     utils::command::BotCommands,
@@ -31,7 +36,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
-    protocol::{SessionInfo, SessionStats, SessionStatus, S2C, S2D},
+    protocol::{AttachedFile, SessionInfo, SessionStats, SessionStatus, S2C, S2D},
     state::{AppState, SessionBuffer},
 };
 
@@ -77,9 +82,21 @@ struct ChatState {
     /// If set, bot replies are threaded to this Telegram message (used for /task).
     task_reply_to: Option<MessageId>,
     created_at: Instant,
+    /// True while a collect_and_send task is active for this session.
+    /// Prevents spawning duplicate collectors when messages arrive mid-response.
+    collector_running: Arc<AtomicBool>,
 }
 
 impl ChatState {
+    fn new(session_id: String, task_reply_to: Option<MessageId>) -> Self {
+        Self {
+            session_id,
+            task_reply_to,
+            created_at: Instant::now(),
+            collector_running: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     fn is_expired(&self) -> bool {
         self.created_at.elapsed() > SESSION_LIFETIME
     }
@@ -177,17 +194,14 @@ async fn handle_command(
             let session_id = create_session(&app_state, chat_id.0, Some(prompt)).await;
             let task_reply_to = msg.id;
 
-            {
+            let collector_flag = {
                 let mut guard = states.write().await;
-                guard.insert(
-                    chat_id.0,
-                    ChatState {
-                        session_id: session_id.clone(),
-                        task_reply_to: Some(task_reply_to),
-                        created_at: Instant::now(),
-                    },
-                );
-            }
+                let state = ChatState::new(session_id.clone(), Some(task_reply_to));
+                let flag = state.collector_running.clone();
+                flag.store(true, Ordering::Relaxed);
+                guard.insert(chat_id.0, state);
+                flag
+            };
 
             let _ = bot
                 .send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
@@ -203,6 +217,7 @@ async fn handle_command(
                 msg.id,
                 session_id,
                 sse_rx,
+                collector_flag,
             ));
         }
 
@@ -272,10 +287,12 @@ async fn handle_message(
     app_state: Arc<AppState>,
     states: ChatStates,
 ) -> ResponseResult<()> {
-    let text = match msg.text() {
-        Some(t) => t.to_string(),
-        None => return Ok(()),
-    };
+    // Text comes from the message body (text messages) or caption (media messages).
+    let text = msg
+        .text()
+        .map(String::from)
+        .or_else(|| msg.caption().map(String::from))
+        .unwrap_or_default();
 
     let chat_id = msg.chat.id;
 
@@ -283,6 +300,23 @@ async fn handle_message(
     if text.trim().eq_ignore_ascii_case("stop") {
         return kill_current_session(&bot, chat_id, &app_state, &states).await;
     }
+
+    // Download any attached files (photos, documents).
+    let files = collect_message_files(&bot, &msg).await;
+
+    // Nothing useful to forward.
+    if text.trim().is_empty() && files.is_empty() {
+        return Ok(());
+    }
+
+    // Slash commands (unrecognised bot commands forwarded to Claude, e.g. /compact)
+    // are threaded back to the command message so they stay grouped.
+    // Regular conversation is inline (no reply thread).
+    let slash_reply = if text.trim_start().starts_with('/') {
+        Some(msg.id)
+    } else {
+        None
+    };
 
     // Subscribe BEFORE sending to avoid missing early streaming events.
     let sse_rx = app_state.sse_tx.subscribe();
@@ -296,7 +330,10 @@ async fn handle_message(
             .unwrap_or((None, None))
     };
 
-    let session_id = if let Some(id) = session_id {
+    // reply_to: prefer the /task thread anchor, then a slash-command reply, else None.
+    let reply_to = task_reply_to.or(slash_reply);
+
+    let (session_id, collector_flag) = if let Some(id) = session_id {
         // If the session never started or has ended (killed/failed/completed),
         // discard it and create a fresh one.
         let is_dead = {
@@ -318,40 +355,91 @@ async fn handle_message(
         if is_dead {
             warn!("telegram: session {id} is dead, creating fresh session");
             states.write().await.remove(&chat_id.0);
-            let new_id = create_session(&app_state, chat_id.0, Some(text)).await;
-            states.write().await.insert(
-                chat_id.0,
-                ChatState {
-                    session_id: new_id.clone(),
-                    task_reply_to: None,
-                    created_at: Instant::now(),
-                },
-            );
-            new_id
+            // When there are files, start without an initial_prompt so we can
+            // send a multimodal SendInputWithFiles message right after.
+            let initial = if files.is_empty() { Some(text.clone()) } else { None };
+            let new_id = create_session(&app_state, chat_id.0, initial).await;
+            if !files.is_empty() {
+                app_state
+                    .send_to_client(&S2C::SendInputWithFiles {
+                        session_id: new_id.clone(),
+                        text: text.clone(),
+                        files: files.clone(),
+                    })
+                    .await;
+            }
+            let flag = {
+                let mut guard = states.write().await;
+                let state = ChatState::new(new_id.clone(), None);
+                let flag = state.collector_running.clone();
+                flag.store(true, Ordering::Relaxed);
+                guard.insert(chat_id.0, state);
+                flag
+            };
+            (new_id, flag)
         } else {
-            app_state
-                .send_to_client(&S2C::SendInput {
-                    session_id: id.clone(),
-                    text,
-                })
-                .await;
-            id
+            // Session is alive. Check if a collector is already running.
+            let (flag, already_running) = {
+                let guard = states.read().await;
+                let flag = guard
+                    .get(&chat_id.0)
+                    .map(|s| s.collector_running.clone())
+                    .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+                let already = flag.load(Ordering::Relaxed);
+                (flag, already)
+            };
+
+            if files.is_empty() {
+                app_state
+                    .send_to_client(&S2C::SendInput {
+                        session_id: id.clone(),
+                        text: text.clone(),
+                    })
+                    .await;
+            } else {
+                app_state
+                    .send_to_client(&S2C::SendInputWithFiles {
+                        session_id: id.clone(),
+                        text: text.clone(),
+                        files: files.clone(),
+                    })
+                    .await;
+            }
+
+            if already_running {
+                // A collector is already active for this session — it will pick up
+                // the next result event. Don't spawn a duplicate.
+                info!("telegram: collector already active for session {id}, skipping spawn");
+                return Ok(());
+            }
+
+            flag.store(true, Ordering::Relaxed);
+            (id, flag)
         }
     } else {
-        // No active session — create one with the first message as initial prompt.
-        let id = create_session(&app_state, chat_id.0, Some(text)).await;
-        {
-            let mut guard = states.write().await;
-            guard.insert(
-                chat_id.0,
-                ChatState {
+        // No active session — create one.
+        // When there are files, start without an initial_prompt so the multimodal
+        // content can be sent via SendInputWithFiles immediately after.
+        let initial = if files.is_empty() { Some(text.clone()) } else { None };
+        let id = create_session(&app_state, chat_id.0, initial).await;
+        if !files.is_empty() {
+            app_state
+                .send_to_client(&S2C::SendInputWithFiles {
                     session_id: id.clone(),
-                    task_reply_to: None,
-                    created_at: Instant::now(),
-                },
-            );
+                    text: text.clone(),
+                    files: files.clone(),
+                })
+                .await;
         }
-        id
+        let flag = {
+            let mut guard = states.write().await;
+            let state = ChatState::new(id.clone(), None);
+            let flag = state.collector_running.clone();
+            flag.store(true, Ordering::Relaxed);
+            guard.insert(chat_id.0, state);
+            flag
+        };
+        (id, flag)
     };
 
     let _ = bot
@@ -364,10 +452,11 @@ async fn handle_message(
     tokio::spawn(collect_and_send(
         bot,
         chat_id,
-        task_reply_to,
+        reply_to,
         msg.id,
         session_id,
         sse_rx,
+        collector_flag,
     ));
 
     Ok(())
@@ -504,6 +593,7 @@ async fn collect_and_send(
     user_msg_id: MessageId,
     session_id: String,
     mut sse_rx: broadcast::Receiver<String>,
+    collector_flag: Arc<AtomicBool>,
 ) {
     info!("telegram: collect_and_send waiting for response on session {session_id}");
     let deadline = tokio::time::Instant::now() + RESPONSE_TIMEOUT;
@@ -663,6 +753,9 @@ async fn collect_and_send(
         }
     }
 
+    // Release the collector slot so the next message can spawn a new collector.
+    collector_flag.store(false, Ordering::Relaxed);
+
     // React ✅ to signal completion.
     set_reaction(&bot, chat_id, user_msg_id, "✅").await;
 
@@ -797,6 +890,97 @@ fn full_tool_input_html(input: &str) -> String {
         return parts.join(" | ");
     }
     escape_html(input.trim())
+}
+
+// ---------------------------------------------------------------------------
+// Attachment helpers
+// ---------------------------------------------------------------------------
+
+/// Downloads all attachments from a Telegram message and returns them as
+/// base64-encoded `AttachedFile` records ready to send to the client daemon.
+///
+/// Supports photos and documents. Other media types (video, voice, sticker)
+/// are silently skipped.
+async fn collect_message_files(bot: &Bot, msg: &Message) -> Vec<AttachedFile> {
+    let mut files = Vec::new();
+
+    // Photos — take the highest-resolution version (last in the array).
+    if let Some(photos) = msg.photo() {
+        if let Some(photo) = photos.last() {
+            let name = format!("photo_{}.jpg", &photo.file.id[..8.min(photo.file.id.len())]);
+            if let Some(data) = download_tg_file(bot, &photo.file.id).await {
+                files.push(AttachedFile {
+                    filename: name,
+                    mime_type: "image/jpeg".to_string(),
+                    data_base64: STANDARD.encode(&data),
+                });
+            }
+        }
+    }
+
+    // Documents (any file the user sends as a file, not compressed).
+    if let Some(doc) = msg.document() {
+        let mime = doc
+            .mime_type
+            .as_ref()
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+        let name = doc
+            .file_name
+            .clone()
+            .unwrap_or_else(|| format!("file_{}", &doc.file.id[..8.min(doc.file.id.len())]));
+        if let Some(data) = download_tg_file(bot, &doc.file.id).await {
+            files.push(AttachedFile {
+                filename: name,
+                mime_type: mime,
+                data_base64: STANDARD.encode(&data),
+            });
+        }
+    }
+
+    files
+}
+
+/// Downloads a Telegram file by its `file_id` into memory.
+/// Returns `None` and logs a warning on any error.
+async fn download_tg_file(bot: &Bot, file_id: &str) -> Option<Vec<u8>> {
+    let file = match bot.get_file(file_id).await {
+        Ok(f) => f,
+        Err(e) => {
+            warn!("telegram: get_file {file_id}: {e}");
+            return None;
+        }
+    };
+
+    // Download into a temp file then read back — tokio::fs::File implements AsyncWrite.
+    let tmp_path = std::env::temp_dir().join(format!("tg_dl_{}", Uuid::new_v4()));
+    let mut dst = match tokio::fs::File::create(&tmp_path).await {
+        Ok(f) => f,
+        Err(e) => {
+            warn!("telegram: failed to create tmp file for download: {e}");
+            return None;
+        }
+    };
+
+    if let Err(e) = bot.download_file(&file.path, &mut dst).await {
+        warn!("telegram: download_file {file_id}: {e}");
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return None;
+    }
+    drop(dst);
+
+    let data = match tokio::fs::read(&tmp_path).await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("telegram: failed to read downloaded file: {e}");
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return None;
+        }
+    };
+    let _ = tokio::fs::remove_file(&tmp_path).await;
+
+    info!("telegram: downloaded {} bytes for file {file_id}", data.len());
+    Some(data)
 }
 
 // ---------------------------------------------------------------------------

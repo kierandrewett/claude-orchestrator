@@ -509,6 +509,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "atty",
+ "base64 0.22.1",
  "chrono",
  "claude-shared",
  "ctrlc",
@@ -537,6 +538,7 @@ dependencies = [
  "actix-web",
  "actix-ws",
  "anyhow",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "claude-shared",

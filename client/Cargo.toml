@@ -25,6 +25,7 @@ hostname          = "0.3"
 open              = "5"
 ctrlc             = "3"
 atty              = "0.2"
+base64            = "0.22"
 # tray-icon is used on all platforms; disable the libxdo default feature so we
 # don't need the xdotool C library installed just to link.  The libxdo feature
 # only enables predefined Copy/Cut/Paste menu items, which we don't use.
