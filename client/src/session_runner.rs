@@ -30,6 +30,21 @@ pub type WsSink = futures_util::stream::SplitSink<
 pub async fn run_session(
     config: SessionConfig,
     ws_tx: Arc<Mutex<WsSink>>,
+    cmd_rx: mpsc::Receiver<S2C>,
+) {
+    // If VM mode is enabled, delegate to the VM orchestrator.
+    if let Ok(Some(vm_cfg)) = crate::vm::config::VmConfig::load() {
+        if vm_cfg.enabled {
+            crate::vm::run_vm_session(config, ws_tx, cmd_rx, vm_cfg).await;
+            return;
+        }
+    }
+    run_session_direct(config, ws_tx, cmd_rx).await;
+}
+
+async fn run_session_direct(
+    config: SessionConfig,
+    ws_tx: Arc<Mutex<WsSink>>,
     mut cmd_rx: mpsc::Receiver<S2C>,
 ) {
     let session_id = config.session_id.clone();
@@ -296,11 +311,12 @@ pub async fn run_session(
 
 // -----------------------------------------------------------------------------
 // Helper: format a user message with attached files for Claude's stream-json
+// (pub so vm/mod.rs can reuse it)
 // stdin format. Images and PDFs are embedded as base64 content blocks;
 // other file types are saved to /tmp/telegram_attachments/ and referenced
 // by path so Claude can read them with its Read tool.
 // -----------------------------------------------------------------------------
-async fn format_user_message_with_files(text: &str, files: &[AttachedFile]) -> String {
+pub async fn format_user_message_with_files(text: &str, files: &[AttachedFile]) -> String {
     let mut blocks: Vec<serde_json::Value> = Vec::new();
     let mut saved_paths: Vec<String> = Vec::new();
 
@@ -397,7 +413,7 @@ fn format_user_message(text: &str) -> String {
 // -----------------------------------------------------------------------------
 // Stats accumulation
 // -----------------------------------------------------------------------------
-fn update_stats(stats: &mut SessionStats, event: &serde_json::Value) {
+pub fn update_stats(stats: &mut SessionStats, event: &serde_json::Value) {
     let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
     // With --include-partial-messages, Anthropic streaming events are wrapped
@@ -463,7 +479,7 @@ fn update_stats(stats: &mut SessionStats, event: &serde_json::Value) {
 // -----------------------------------------------------------------------------
 // WebSocket send helper
 // -----------------------------------------------------------------------------
-async fn ws_send(ws_tx: &Mutex<WsSink>, msg: &C2S) {
+pub async fn ws_send(ws_tx: &Mutex<WsSink>, msg: &C2S) {
     match serde_json::to_string(msg) {
         Ok(json) => {
             let mut sink = ws_tx.lock().await;

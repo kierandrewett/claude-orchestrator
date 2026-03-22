@@ -3,6 +3,7 @@ mod history_importer;
 mod protocol;
 mod session_runner;
 mod tray;
+mod vm;
 
 use std::sync::{Arc, Mutex};
 use tracing::info;

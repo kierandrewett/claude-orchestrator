@@ -307,6 +307,63 @@ async fn handle_text_message(
             route_to_session(session_map, session_id, msg.clone()).await;
         }
 
+        S2C::GetVmConfig { request_id } => {
+            let ws_tx_clone = Arc::clone(ws_tx);
+            tokio::spawn(async move {
+                match crate::vm::config::VmConfig::load() {
+                    Ok(Some(cfg)) => {
+                        ws_send(
+                            &ws_tx_clone,
+                            &C2S::VmConfig {
+                                request_id,
+                                config: cfg.into(),
+                            },
+                        )
+                        .await;
+                    }
+                    Ok(None) => {
+                        ws_send(
+                            &ws_tx_clone,
+                            &C2S::VmConfigAck {
+                                request_id,
+                                success: false,
+                                error: Some("no vm.toml found".to_string()),
+                            },
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        ws_send(
+                            &ws_tx_clone,
+                            &C2S::VmConfigAck {
+                                request_id,
+                                success: false,
+                                error: Some(e.to_string()),
+                            },
+                        )
+                        .await;
+                    }
+                }
+            });
+        }
+
+        S2C::SetVmConfig { request_id, config } => {
+            let ws_tx_clone = Arc::clone(ws_tx);
+            tokio::spawn(async move {
+                let vm_cfg: crate::vm::config::VmConfig = config.into();
+                let result = vm_cfg.save();
+                ws_send(
+                    &ws_tx_clone,
+                    &C2S::VmConfigAck {
+                        request_id,
+                        success: result.is_ok(),
+                        error: result.err().map(|e| e.to_string()),
+                    },
+                )
+                .await;
+            });
+        }
+
         S2C::QueryCommands => {
             info!("QueryCommands: discovering slash commands");
             let claude_path = config.claude_path.clone();

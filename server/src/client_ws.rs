@@ -264,6 +264,25 @@ async fn handle_text(state: &Arc<AppState>, text: &str) {
         }
 
         // -------------------------------------------------------------------
+        C2S::VmConfig { request_id, config } => {
+            let mut pending = state.vm_config_pending.write().await;
+            if let Some(tx) = pending.remove(&request_id) {
+                let _ = tx.send(crate::protocol::VmConfigResponse::Config(config));
+            }
+        }
+
+        C2S::VmConfigAck {
+            request_id,
+            success,
+            error,
+        } => {
+            let mut pending = state.vm_config_pending.write().await;
+            if let Some(tx) = pending.remove(&request_id) {
+                let _ = tx.send(crate::protocol::VmConfigResponse::Ack { success, error });
+            }
+        }
+
+        // -------------------------------------------------------------------
         C2S::ImportHistory { sessions } => {
             let hostname = {
                 let guard = state.client.read().await;

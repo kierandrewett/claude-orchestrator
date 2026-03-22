@@ -162,8 +162,8 @@ fn draw_badge(pixels: &mut Vec<u8>, w: u32, h: u32, count: usize) {
         _ => b"+",
     };
 
-    // Badge is 16×16 px, flush to bottom-right corner.
-    let badge_size: i32 = 16;
+    // Badge is 24×24 px, flush to bottom-right corner.
+    let badge_size: i32 = 24;
     let bx = w as i32 - badge_size;
     let by = h as i32 - badge_size;
     let r = badge_size / 2 - 1; // radius slightly inside the bounding box
@@ -181,10 +181,10 @@ fn draw_badge(pixels: &mut Vec<u8>, w: u32, h: u32, count: usize) {
         }
     }
 
-    // Digit rendered at 2× scale (each font pixel → 2×2 block) for readability.
-    // Base font is 3 wide × 5 tall; scaled glyph is 6 wide × 10 tall.
+    // Digit rendered at 3× scale (each font pixel → 3×3 block) for readability.
+    // Base font is 3 wide × 5 tall; scaled glyph is 9 wide × 15 tall.
     let glyph = digit_glyph(label[0]);
-    let scale: i32 = 2;
+    let scale: i32 = 3;
     let gx = cx - (3 * scale) / 2; // left edge, horizontally centred
     let gy = cy - (5 * scale) / 2; // top edge, vertically centred
     for (row, bits) in glyph.iter().enumerate() {

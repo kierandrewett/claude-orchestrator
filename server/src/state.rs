@@ -3,6 +3,8 @@ use std::{
     sync::Arc,
 };
 
+pub use crate::protocol::VmConfigResponse;
+
 use actix_ws::Session as WsSession;
 use tokio::sync::{broadcast, RwLock};
 use tracing::error;
@@ -44,6 +46,10 @@ pub struct AppState {
     pub commands: RwLock<Vec<crate::protocol::SlashCommand>>,
     pub store: Arc<crate::persist::Store>,
     pub pending_resumes: RwLock<Vec<SessionInfo>>,
+    /// Pending VM config request/response correlations.
+    /// Key = request_id, value = oneshot sender to wake the waiting handler.
+    pub vm_config_pending:
+        RwLock<HashMap<String, tokio::sync::oneshot::Sender<VmConfigResponse>>>,
 }
 
 impl AppState {
@@ -79,6 +85,7 @@ impl AppState {
             commands: RwLock::new(Vec::new()),
             store,
             pending_resumes: RwLock::new(Vec::new()),
+            vm_config_pending: RwLock::new(HashMap::new()),
         })
     }
 

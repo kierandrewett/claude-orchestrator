@@ -36,7 +36,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
-    protocol::{AttachedFile, SessionStatus, S2C},
+    protocol::{AttachedFile, SessionStatus, VmConfigProto, VmConfigResponse, S2C},
     provider::{self, ConversationSession, MessagingProvider, Responder, ToolEntry},
     state::AppState,
 };
@@ -69,6 +69,21 @@ enum Cmd {
     New,
     #[command(description = "Stop Claude immediately")]
     Stop,
+    // ── VM management ──
+    #[command(description = "Show VM config")]
+    Vmconfig,
+    #[command(description = "Add mount: /vmaddmount <name> <host_path> <guest_path> [size_gb]")]
+    Vmaddmount(String),
+    #[command(description = "Remove mount: /vmrmmount <name>")]
+    Vmrmmount(String),
+    #[command(description = "Manage tools: /vmtools list | add <pkg> | rm <pkg>")]
+    Vmtools(String),
+    #[command(description = "Enable VM mode")]
+    Vmenable,
+    #[command(description = "Disable VM mode")]
+    Vmdisable,
+    #[command(description = "Rebuild VM rootfs on the client machine")]
+    Vmrebuild,
 }
 
 // ---------------------------------------------------------------------------
@@ -300,6 +315,155 @@ async fn handle_command(
         Cmd::Stop => {
             kill_current_session(&bot, chat_id, &app_state, &states).await?;
         }
+
+        // ── VM management commands ──────────────────────────────────────────
+
+        Cmd::Vmconfig => {
+            match vm_get_config(&app_state).await {
+                Ok(cfg) => {
+                    bot.send_message(chat_id, format_vm_config(&cfg))
+                        .parse_mode(ParseMode::Html)
+                        .await?;
+                }
+                Err(e) => {
+                    bot.send_message(chat_id, format!("❌ {e}")).await?;
+                }
+            }
+        }
+
+        Cmd::Vmenable => {
+            vm_update_config(&bot, chat_id, &app_state, |c| c.enabled = true).await?;
+        }
+
+        Cmd::Vmdisable => {
+            vm_update_config(&bot, chat_id, &app_state, |c| c.enabled = false).await?;
+        }
+
+        Cmd::Vmaddmount(args) => {
+            let parts: Vec<&str> = args.split_whitespace().collect();
+            if parts.len() < 3 {
+                bot.send_message(
+                    chat_id,
+                    "Usage: /vmaddmount <name> <host_path> <guest_path> [size_gb]",
+                )
+                .await?;
+                return Ok(());
+            }
+            let name = parts[0].to_string();
+            let host_path = parts[1].to_string();
+            let guest_path = parts[2].to_string();
+            let size_gb: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(20);
+
+            vm_update_config(&bot, chat_id, &app_state, move |c| {
+                // Remove existing mount with same name
+                c.mounts.retain(|m| m.name != name);
+                c.mounts.push(crate::protocol::VolumeMountProto {
+                    name,
+                    host_path,
+                    guest_path,
+                    size_gb,
+                    excludes: vec![
+                        "node_modules".to_string(),
+                        "target".to_string(),
+                        ".git/objects".to_string(),
+                    ],
+                });
+            })
+            .await?;
+        }
+
+        Cmd::Vmrmmount(name) => {
+            let name = name.trim().to_string();
+            vm_update_config(&bot, chat_id, &app_state, move |c| {
+                c.mounts.retain(|m| m.name != name);
+            })
+            .await?;
+        }
+
+        Cmd::Vmtools(args) => {
+            let parts: Vec<&str> = args.split_whitespace().collect();
+            match parts.as_slice() {
+                ["list"] | [] => {
+                    match vm_get_config(&app_state).await {
+                        Ok(cfg) => {
+                            let pkgs = if cfg.tools.extra_packages.is_empty() {
+                                "(none — only base Alpine packages)".to_string()
+                            } else {
+                                cfg.tools.extra_packages.join(", ")
+                            };
+                            bot.send_message(
+                                chat_id,
+                                format!("🔧 <b>Extra packages:</b> {pkgs}"),
+                            )
+                            .parse_mode(ParseMode::Html)
+                            .await?;
+                        }
+                        Err(e) => {
+                            bot.send_message(chat_id, format!("❌ {e}")).await?;
+                        }
+                    }
+                }
+                ["add", pkg] => {
+                    let pkg = pkg.to_string();
+                    vm_update_config(&bot, chat_id, &app_state, move |c| {
+                        if !c.tools.extra_packages.contains(&pkg) {
+                            c.tools.extra_packages.push(pkg);
+                        }
+                    })
+                    .await?;
+                }
+                ["rm", pkg] => {
+                    let pkg = pkg.to_string();
+                    vm_update_config(&bot, chat_id, &app_state, move |c| {
+                        c.tools.extra_packages.retain(|p| p != &pkg);
+                    })
+                    .await?;
+                }
+                _ => {
+                    bot.send_message(
+                        chat_id,
+                        "Usage: /vmtools list | /vmtools add <pkg> | /vmtools rm <pkg>",
+                    )
+                    .await?;
+                }
+            }
+        }
+
+        Cmd::Vmrebuild => {
+            bot.send_message(chat_id, "🔨 Requesting rootfs rebuild on client…")
+                .await?;
+            // Rebuild is triggered by sending an updated config that the client
+            // detects has changed. For now, just send the current config back,
+            // which makes the client re-save it (a future hook can detect the
+            // rootfs is stale). A dedicated S2C::RebuildRootfs message could be
+            // added later.
+            match vm_get_config(&app_state).await {
+                Ok(cfg) => {
+                    let request_id = Uuid::new_v4().to_string();
+                    match vm_send_and_await(&app_state, crate::protocol::S2C::SetVmConfig {
+                        request_id,
+                        config: cfg,
+                    })
+                    .await
+                    {
+                        Ok(_) => {
+                            bot.send_message(
+                                chat_id,
+                                "✅ Config saved. Run <code>claude-client --rebuild-rootfs</code> on the client to rebuild.",
+                            )
+                            .parse_mode(ParseMode::Html)
+                            .await?;
+                        }
+                        Err(e) => {
+                            bot.send_message(chat_id, format!("❌ {e}")).await?;
+                        }
+                    }
+                }
+                Err(e) => {
+                    bot.send_message(chat_id, format!("❌ {e}")).await?;
+                }
+            }
+        }
     }
 
     Ok(())
@@ -526,6 +690,148 @@ async fn kill_current_session(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// VM config helpers
+// ---------------------------------------------------------------------------
+
+/// Timeout for waiting for a VM config request/response round-trip.
+const VM_CONFIG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Sends `msg` to the client and awaits the corresponding response via the
+/// `vm_config_pending` oneshot map.  Returns an error string if the client is
+/// not connected, the send fails, or the timeout elapses.
+async fn vm_send_and_await(
+    app_state: &Arc<AppState>,
+    msg: S2C,
+) -> anyhow::Result<VmConfigResponse> {
+    // Extract request_id from the message so we can register the waiter.
+    let request_id = match &msg {
+        S2C::GetVmConfig { request_id } => request_id.clone(),
+        S2C::SetVmConfig { request_id, .. } => request_id.clone(),
+        _ => anyhow::bail!("vm_send_and_await: unexpected message type"),
+    };
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    {
+        let mut pending = app_state.vm_config_pending.write().await;
+        pending.insert(request_id, tx);
+    }
+
+    if !app_state.send_to_client(&msg).await {
+        anyhow::bail!("client not connected");
+    }
+
+    match tokio::time::timeout(VM_CONFIG_TIMEOUT, rx).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(_)) => anyhow::bail!("client dropped the response channel"),
+        Err(_) => anyhow::bail!("timed out waiting for VM config response"),
+    }
+}
+
+/// Sends `GetVmConfig` to the client and returns the config.
+async fn vm_get_config(app_state: &Arc<AppState>) -> anyhow::Result<VmConfigProto> {
+    let request_id = Uuid::new_v4().to_string();
+    match vm_send_and_await(app_state, S2C::GetVmConfig { request_id }).await? {
+        VmConfigResponse::Config(cfg) => Ok(cfg),
+        VmConfigResponse::Ack { error: Some(e), .. } => anyhow::bail!("{e}"),
+        VmConfigResponse::Ack { .. } => {
+            anyhow::bail!("unexpected Ack response to GetVmConfig")
+        }
+    }
+}
+
+/// Gets the current VM config, applies `mutate`, sends it back via
+/// `SetVmConfig`, and sends a confirmation or error message to `chat_id`.
+async fn vm_update_config<F>(
+    bot: &Bot,
+    chat_id: ChatId,
+    app_state: &Arc<AppState>,
+    mutate: F,
+) -> ResponseResult<()>
+where
+    F: FnOnce(&mut VmConfigProto),
+{
+    let mut cfg = match vm_get_config(app_state).await {
+        Ok(c) => c,
+        Err(e) => {
+            bot.send_message(chat_id, format!("❌ {e}")).await?;
+            return Ok(());
+        }
+    };
+
+    mutate(&mut cfg);
+
+    let request_id = Uuid::new_v4().to_string();
+    match vm_send_and_await(
+        app_state,
+        S2C::SetVmConfig {
+            request_id,
+            config: cfg.clone(),
+        },
+    )
+    .await
+    {
+        Ok(VmConfigResponse::Ack { success: true, .. }) => {
+            bot.send_message(chat_id, format_vm_config(&cfg))
+                .parse_mode(ParseMode::Html)
+                .await?;
+        }
+        Ok(VmConfigResponse::Ack {
+            success: false,
+            error,
+        }) => {
+            let msg = error.unwrap_or_else(|| "unknown error".to_string());
+            bot.send_message(chat_id, format!("❌ {msg}")).await?;
+        }
+        Ok(_) => {
+            bot.send_message(chat_id, "❌ Unexpected response from client.")
+                .await?;
+        }
+        Err(e) => {
+            bot.send_message(chat_id, format!("❌ {e}")).await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Formats a `VmConfigProto` as Telegram HTML.
+fn format_vm_config(cfg: &VmConfigProto) -> String {
+    let status = if cfg.enabled { "✅ enabled" } else { "❌ disabled" };
+    let mut lines = vec![
+        format!("🖥 <b>VM Config</b> — {status}"),
+        format!("  vCPUs: <code>{}</code>  RAM: <code>{}MB</code>", cfg.vcpus, cfg.memory_mb),
+        format!("  Kernel: <code>{}</code>", escape_html(&cfg.kernel_path)),
+        format!("  Rootfs: <code>{}</code>", escape_html(&cfg.rootfs_path)),
+    ];
+
+    if cfg.mounts.is_empty() {
+        lines.push("  <b>Mounts:</b> (none)".to_string());
+    } else {
+        lines.push("  <b>Mounts:</b>".to_string());
+        for m in &cfg.mounts {
+            lines.push(format!(
+                "    • <code>{}</code>: {} → {} ({}GB)",
+                escape_html(&m.name),
+                escape_html(&m.host_path),
+                escape_html(&m.guest_path),
+                m.size_gb,
+            ));
+        }
+    }
+
+    if cfg.tools.extra_packages.is_empty() {
+        lines.push("  <b>Extra packages:</b> (none)".to_string());
+    } else {
+        lines.push(format!(
+            "  <b>Extra packages:</b> {}",
+            cfg.tools.extra_packages.join(", ")
+        ));
+    }
+
+    lines.join("\n")
 }
 
 // ---------------------------------------------------------------------------
