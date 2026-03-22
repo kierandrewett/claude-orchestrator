@@ -63,6 +63,8 @@ enum Cmd {
     Status,
     #[command(description = "Force a new Claude session")]
     New,
+    #[command(description = "Stop Claude immediately")]
+    Stop,
 }
 
 // ---------------------------------------------------------------------------
@@ -245,6 +247,10 @@ async fn handle_command(
             )
             .await?;
         }
+
+        Cmd::Stop => {
+            kill_current_session(&bot, chat_id, &app_state, &states).await?;
+        }
     }
 
     Ok(())
@@ -266,6 +272,11 @@ async fn handle_message(
     };
 
     let chat_id = msg.chat.id;
+
+    // "stop" safe word — kill immediately without forwarding to Claude.
+    if text.trim().eq_ignore_ascii_case("stop") {
+        return kill_current_session(&bot, chat_id, &app_state, &states).await;
+    }
 
     // Subscribe BEFORE sending to avoid missing early streaming events.
     let sse_rx = app_state.sse_tx.subscribe();
@@ -410,6 +421,56 @@ async fn create_session(
         .await;
 
     session_id
+}
+
+// ---------------------------------------------------------------------------
+// Stop / kill helper
+// ---------------------------------------------------------------------------
+
+/// Kills the active session for this chat (if any) and clears the chat state.
+async fn kill_current_session(
+    bot: &Bot,
+    chat_id: ChatId,
+    app_state: &Arc<AppState>,
+    states: &ChatStates,
+) -> ResponseResult<()> {
+    let session_id = {
+        let guard = states.read().await;
+        guard
+            .get(&chat_id.0)
+            .filter(|s| !s.is_expired())
+            .map(|s| s.session_id.clone())
+    };
+
+    if let Some(id) = session_id {
+        // Only kill sessions that are actually running.
+        let is_running = {
+            let sessions = app_state.sessions.read().await;
+            sessions
+                .get(&id)
+                .map(|b| matches!(b.info.status, crate::protocol::SessionStatus::Running))
+                .unwrap_or(false)
+        };
+
+        if is_running {
+            info!("telegram: killing session {id} on user request");
+            app_state
+                .send_to_client(&S2C::KillSession {
+                    session_id: id.clone(),
+                })
+                .await;
+            states.write().await.remove(&chat_id.0);
+            bot.send_message(chat_id, "🛑 Stopped.").await?;
+        } else {
+            bot.send_message(chat_id, "Nothing is running right now.")
+                .await?;
+        }
+    } else {
+        bot.send_message(chat_id, "Nothing is running right now.")
+            .await?;
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
