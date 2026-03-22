@@ -23,7 +23,7 @@ use std::{
 use chrono::Utc;
 use teloxide::{
     prelude::*,
-    types::{MessageId, ReplyParameters},
+    types::{MessageId, ParseMode, ReactionType, ReplyParameters},
     utils::command::BotCommands,
 };
 use tokio::sync::{broadcast, RwLock};
@@ -45,8 +45,9 @@ const SESSION_LIFETIME: Duration = Duration::from_secs(12 * 60 * 60);
 /// How long to wait for Claude to respond before giving up.
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Telegram's message character limit.
-const TG_MSG_LIMIT: usize = 4000;
+/// Telegram's message character limit. Reduced from 4096 to leave headroom for
+/// HTML tags added by md_to_html.
+const TG_MSG_LIMIT: usize = 3500;
 
 // ---------------------------------------------------------------------------
 // Bot commands
@@ -192,10 +193,14 @@ async fn handle_command(
                 .send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
                 .await;
 
+            // Acknowledge receipt with eyes reaction.
+            set_reaction(&bot, chat_id, msg.id, "👀").await;
+
             tokio::spawn(collect_and_send(
                 bot,
                 chat_id,
                 Some(task_reply_to),
+                msg.id,
                 session_id,
                 sse_rx,
             ));
@@ -213,7 +218,7 @@ async fn handle_command(
                     bot.send_message(
                         chat_id,
                         format!(
-                            "📊 *Session status*\nID: `{}`\nStatus: {}\nAge: {}h {}m\nExpires in: {}h {}m\nTokens: {}↑ {}↓\nCost: ${:.4}",
+                            "📊 <b>Session status</b>\nID: <code>{}</code>\nStatus: {}\nAge: {}h {}m\nExpires in: {}h {}m\nTokens: {}↑ {}↓\nCost: ${:.4}",
                             &state.session_id[..8],
                             status_str,
                             age.as_secs() / 3600,
@@ -225,6 +230,7 @@ async fn handle_command(
                             stats.cost_usd.unwrap_or(0.0),
                         ),
                     )
+                    .parse_mode(ParseMode::Html)
                     .await?;
                 } else {
                     bot.send_message(chat_id, "No active session. Send a message to start one.")
@@ -352,10 +358,14 @@ async fn handle_message(
         .send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
         .await;
 
+    // Acknowledge receipt with eyes reaction.
+    set_reaction(&bot, chat_id, msg.id, "👀").await;
+
     tokio::spawn(collect_and_send(
         bot,
         chat_id,
         task_reply_to,
+        msg.id,
         session_id,
         sse_rx,
     ));
@@ -482,10 +492,16 @@ async fn kill_current_session(
 ///
 /// While Claude is working, tool calls are displayed as a live-edited status
 /// message. When the final text response arrives it is sent as a new message.
+///
+/// Reactions on `user_msg_id`:
+///   👀  (set before spawning in the handler) — message received
+///   🏗   — first tool call started
+///   ✅  — response complete
 async fn collect_and_send(
     bot: Bot,
     chat_id: ChatId,
     reply_to: Option<MessageId>,
+    user_msg_id: MessageId,
     session_id: String,
     mut sse_rx: broadcast::Receiver<String>,
 ) {
@@ -502,6 +518,8 @@ async fn collect_and_send(
     let mut current_tool: Option<(String, String)> = None;
     // The Telegram message used to show live tool status (created on first tool call).
     let mut status_msg_id: Option<MessageId> = None;
+    // Whether we've already switched to the 🏗 reaction.
+    let mut building_reaction_set = false;
 
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -544,6 +562,18 @@ async fn collect_and_send(
                                                     .unwrap_or("unknown")
                                                     .to_string();
                                                 current_tool = Some((name, String::new()));
+
+                                                // Switch reaction to 🏗 on first tool call.
+                                                if !building_reaction_set {
+                                                    set_reaction(
+                                                        &bot,
+                                                        chat_id,
+                                                        user_msg_id,
+                                                        "🏗",
+                                                    )
+                                                    .await;
+                                                    building_reaction_set = true;
+                                                }
                                             }
                                         }
                                         "content_block_delta" => {
@@ -633,13 +663,19 @@ async fn collect_and_send(
         }
     }
 
+    // React ✅ to signal completion.
+    set_reaction(&bot, chat_id, user_msg_id, "✅").await;
+
     if text.is_empty() {
         info!("telegram: no text to send for session {session_id}");
         return;
     }
 
     for chunk in split_message(&text) {
-        let mut req = bot.send_message(chat_id, &chunk);
+        let html = md_to_html(&chunk);
+        let mut req = bot
+            .send_message(chat_id, &html)
+            .parse_mode(ParseMode::Html);
         if let Some(rid) = reply_to {
             req = req.reply_parameters(ReplyParameters::new(rid));
         }
@@ -648,6 +684,10 @@ async fn collect_and_send(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tool-status message helpers
+// ---------------------------------------------------------------------------
 
 /// Sends or edits the live tool-status message.
 ///
@@ -664,7 +704,11 @@ async fn update_tool_status(
     let body = format_tool_status(tools, done);
 
     if let Some(mid) = existing_id {
-        match bot.edit_message_text(chat_id, mid, &body).await {
+        match bot
+            .edit_message_text(chat_id, mid, &body)
+            .parse_mode(ParseMode::Html)
+            .await
+        {
             Ok(_) => return Some(mid),
             Err(e) => {
                 warn!("telegram: failed to edit tool status message: {e}");
@@ -674,7 +718,9 @@ async fn update_tool_status(
     }
 
     // No existing message — send a new one.
-    let mut req = bot.send_message(chat_id, &body);
+    let mut req = bot
+        .send_message(chat_id, &body)
+        .parse_mode(ParseMode::Html);
     if let Some(rid) = reply_to {
         req = req.reply_parameters(ReplyParameters::new(rid));
     }
@@ -687,17 +733,29 @@ async fn update_tool_status(
     }
 }
 
-/// Formats the list of completed tool calls into a compact status string.
+/// Formats the list of completed tool calls as HTML.
+///
+/// Each tool shows a brief summary (always visible) plus the full input in a
+/// `<tg-spoiler>` block that the user can tap to reveal.
 fn format_tool_status(tools: &[(String, String)], done: bool) -> String {
     let icon = if done { "✅" } else { "⚙️" };
-    let mut lines = vec![format!("{icon} Tool calls")];
+    let mut lines = vec![format!("{icon} <b>Tool calls</b>")];
     for (name, input) in tools {
         let summary = summarise_tool_input(input);
-        if summary.is_empty() {
-            lines.push(format!("• {name}"));
+        let full_html = full_tool_input_html(input);
+
+        let line = if summary.is_empty() {
+            format!("• <b>{}</b>", escape_html(name))
+        } else if full_html.len() > escape_html(&summary).len() + 10 {
+            // Has meaningful extra detail — show summary + spoiler with full input.
+            format!(
+                "• <b>{name}</b> — <code>{}</code> <tg-spoiler>{full_html}</tg-spoiler>",
+                escape_html(&summary),
+            )
         } else {
-            lines.push(format!("• {name} — {summary}"));
-        }
+            format!("• <b>{name}</b> — <code>{}</code>", escape_html(&summary))
+        };
+        lines.push(line);
     }
     lines.join("\n")
 }
@@ -707,48 +765,335 @@ fn summarise_tool_input(input: &str) -> String {
     if input.is_empty() {
         return String::new();
     }
-    // Try to parse as a JSON object and list top-level keys / first value.
     if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(input) {
-        // Show the first key=value pair as a hint (truncated).
         if let Some((k, v)) = map.iter().next() {
             let val = match v {
-                serde_json::Value::String(s) => {
-                    if s.len() > 50 {
-                        format!("{}…", &s[..50])
-                    } else {
-                        s.clone()
-                    }
-                }
-                other => {
-                    let s = other.to_string();
-                    if s.len() > 50 {
-                        format!("{}…", &s[..50])
-                    } else {
-                        s
-                    }
-                }
+                serde_json::Value::String(s) => truncate_chars(s, 80),
+                other => truncate_chars(&other.to_string(), 80),
             };
             return format!("{k}={val}");
         }
     }
-    // Fall back to a truncated raw string.
-    let trimmed = input.trim();
-    if trimmed.len() <= 60 {
-        trimmed.to_string()
-    } else {
-        format!("{}…", &trimmed[..60])
+    truncate_chars(input.trim(), 80)
+}
+
+/// Returns all key=value pairs from the tool input as HTML, suitable for use
+/// inside a `<tg-spoiler>` block.
+fn full_tool_input_html(input: &str) -> String {
+    if input.is_empty() {
+        return String::new();
     }
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(input) {
+        let parts: Vec<String> = map
+            .iter()
+            .map(|(k, v)| {
+                let val = match v {
+                    serde_json::Value::String(s) => escape_html(s),
+                    other => escape_html(&other.to_string()),
+                };
+                format!("<b>{}</b>={val}", escape_html(k))
+            })
+            .collect();
+        return parts.join(" | ");
+    }
+    escape_html(input.trim())
+}
+
+// ---------------------------------------------------------------------------
+// Reaction helper
+// ---------------------------------------------------------------------------
+
+/// Sets a reaction emoji on a message. Logs and swallows errors (e.g. if the
+/// emoji isn't in Telegram's allowed reaction set).
+async fn set_reaction(bot: &Bot, chat_id: ChatId, msg_id: MessageId, emoji: &str) {
+    let reaction = vec![ReactionType::Emoji {
+        emoji: emoji.to_string(),
+    }];
+    if let Err(e) = bot
+        .set_message_reaction(chat_id, msg_id)
+        .reaction(reaction)
+        .await
+    {
+        warn!("telegram: failed to set reaction {emoji}: {e}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Markdown → Telegram HTML converter
+// ---------------------------------------------------------------------------
+
+/// Converts Claude's CommonMark output to Telegram HTML.
+///
+/// Supported: fenced code blocks, inline code, **bold**, *italic*, _italic_,
+/// __bold__, headers (→ bold), [links](url). Everything else is HTML-escaped.
+pub fn md_to_html(md: &str) -> String {
+    let mut out = String::with_capacity(md.len() + 256);
+    let mut lines = md.lines().peekable();
+
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim_start();
+
+        // Fenced code block (``` or ~~~)
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            let fence_marker = if trimmed.starts_with("```") {
+                "```"
+            } else {
+                "~~~"
+            };
+            // Everything after the fence marker on the opening line is the language hint.
+            // (Telegram doesn't render it but we include it for completeness.)
+            let mut code_lines: Vec<&str> = Vec::new();
+
+            for inner in lines.by_ref() {
+                if inner.trim_start().starts_with(fence_marker) {
+                    break;
+                }
+                code_lines.push(inner);
+            }
+
+            let code = code_lines.join("\n");
+            out.push_str("<pre><code>");
+            out.push_str(&escape_html(&code));
+            out.push_str("</code></pre>\n");
+            continue;
+        }
+
+        // Normal line — process inline formatting.
+        out.push_str(&process_inline_md(line));
+        out.push('\n');
+    }
+
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+/// Handles Markdown headers and delegates everything else to `process_inline_spans`.
+fn process_inline_md(line: &str) -> String {
+    // ATX-style headers: strip leading #s and wrap in <b>
+    let content = if let Some(rest) = line
+        .strip_prefix("#### ")
+        .or_else(|| line.strip_prefix("### "))
+        .or_else(|| line.strip_prefix("## "))
+        .or_else(|| line.strip_prefix("# "))
+    {
+        return format!("<b>{}</b>", process_inline_spans(rest));
+    } else {
+        line
+    };
+
+    process_inline_spans(content)
+}
+
+/// Converts inline Markdown spans (bold, italic, code, links) to HTML.
+/// Also HTML-escapes `&`, `<`, `>` in plain text regions.
+fn process_inline_spans(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut i = 0;
+
+    while i < chars.len() {
+        match chars[i] {
+            // HTML special chars in plain text
+            '&' => {
+                out.push_str("&amp;");
+                i += 1;
+            }
+            '<' => {
+                out.push_str("&lt;");
+                i += 1;
+            }
+            '>' => {
+                out.push_str("&gt;");
+                i += 1;
+            }
+
+            // Inline code: `...`
+            '`' => {
+                let start = i + 1;
+                let mut end = start;
+                while end < chars.len() && chars[end] != '`' {
+                    end += 1;
+                }
+                if end < chars.len() {
+                    let code: String = chars[start..end].iter().collect();
+                    out.push_str("<code>");
+                    out.push_str(&escape_html(&code));
+                    out.push_str("</code>");
+                    i = end + 1;
+                } else {
+                    out.push('`');
+                    i += 1;
+                }
+            }
+
+            // Bold ** or italic *
+            '*' => {
+                if i + 1 < chars.len() && chars[i + 1] == '*' {
+                    // Potential bold **text**
+                    let start = i + 2;
+                    let mut j = start;
+                    while j + 1 < chars.len() {
+                        if chars[j] == '*' && chars[j + 1] == '*' {
+                            break;
+                        }
+                        j += 1;
+                    }
+                    if j + 1 < chars.len() && chars[j] == '*' && chars[j + 1] == '*' {
+                        let inner: String = chars[start..j].iter().collect();
+                        out.push_str("<b>");
+                        out.push_str(&process_inline_spans(&inner));
+                        out.push_str("</b>");
+                        i = j + 2;
+                    } else {
+                        // No closing ** — output literally
+                        out.push('*');
+                        i += 1;
+                    }
+                } else if i + 1 < chars.len() && !chars[i + 1].is_whitespace() {
+                    // Potential italic *text*
+                    let start = i + 1;
+                    let mut j = start;
+                    while j < chars.len() && chars[j] != '*' {
+                        j += 1;
+                    }
+                    if j < chars.len() {
+                        let inner: String = chars[start..j].iter().collect();
+                        out.push_str("<i>");
+                        out.push_str(&process_inline_spans(&inner));
+                        out.push_str("</i>");
+                        i = j + 1;
+                    } else {
+                        out.push('*');
+                        i += 1;
+                    }
+                } else {
+                    // Bullet list marker or lonely asterisk — output literally
+                    out.push('*');
+                    i += 1;
+                }
+            }
+
+            // Bold __ or italic _
+            '_' => {
+                if i + 1 < chars.len() && chars[i + 1] == '_' {
+                    // Potential bold __text__
+                    let start = i + 2;
+                    let mut j = start;
+                    while j + 1 < chars.len() {
+                        if chars[j] == '_' && chars[j + 1] == '_' {
+                            break;
+                        }
+                        j += 1;
+                    }
+                    if j + 1 < chars.len() && chars[j] == '_' && chars[j + 1] == '_' {
+                        let inner: String = chars[start..j].iter().collect();
+                        out.push_str("<b>");
+                        out.push_str(&process_inline_spans(&inner));
+                        out.push_str("</b>");
+                        i = j + 2;
+                    } else {
+                        out.push('_');
+                        i += 1;
+                    }
+                } else if i + 1 < chars.len() && !chars[i + 1].is_whitespace() {
+                    // Potential italic _text_
+                    let start = i + 1;
+                    let mut j = start;
+                    while j < chars.len() && chars[j] != '_' {
+                        j += 1;
+                    }
+                    if j < chars.len() {
+                        let inner: String = chars[start..j].iter().collect();
+                        out.push_str("<i>");
+                        out.push_str(&process_inline_spans(&inner));
+                        out.push_str("</i>");
+                        i = j + 1;
+                    } else {
+                        out.push('_');
+                        i += 1;
+                    }
+                } else {
+                    out.push('_');
+                    i += 1;
+                }
+            }
+
+            // Links: [text](url)
+            '[' => {
+                // Find closing ]
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] != ']' {
+                    j += 1;
+                }
+                if j < chars.len() && j + 1 < chars.len() && chars[j + 1] == '(' {
+                    let link_text: String = chars[i + 1..j].iter().collect();
+                    let mut k = j + 2;
+                    while k < chars.len() && chars[k] != ')' {
+                        k += 1;
+                    }
+                    if k < chars.len() {
+                        let url: String = chars[j + 2..k].iter().collect();
+                        out.push_str(&format!(
+                            "<a href=\"{}\">{}</a>",
+                            escape_html(&url),
+                            escape_html(&link_text)
+                        ));
+                        i = k + 1;
+                        continue;
+                    }
+                }
+                // Not a valid link — output [ literally
+                out.push('[');
+                i += 1;
+            }
+
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+
+    out
 }
 
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
 
+/// Escapes HTML special characters (`&`, `<`, `>`).
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Truncates a string to at most `max_chars` Unicode characters, appending `…`
+/// if truncation occurs.
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let mut result = String::with_capacity(max_chars + 4);
+    let mut count = 0;
+    for c in chars.by_ref() {
+        if count >= max_chars {
+            result.push('…');
+            return result;
+        }
+        result.push(c);
+        count += 1;
+    }
+    result
+}
+
 fn split_message(text: &str) -> Vec<String> {
     if text.len() <= TG_MSG_LIMIT {
         return vec![text.to_string()];
     }
-    // Split on newline boundaries where possible
+    // Split on newline boundaries where possible.
+    // Note: splitting mid-code-block will produce slightly malformed HTML in
+    // the second chunk, but this is an acceptable trade-off for very long responses.
     let mut chunks = Vec::new();
     let mut current = String::new();
     for line in text.split('\n') {
