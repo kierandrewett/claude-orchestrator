@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+use tracing::debug;
 use tokio::process::{Child, Command};
 use tracing::{info, warn};
 
@@ -149,23 +150,30 @@ impl FirecrackerVm {
 
 /// Sends a PUT request to the Firecracker API socket.
 async fn api_put(socket_path: &str, path: &str, body: Value) -> Result<()> {
+    debug!("firecracker: PUT {path}");
     let body_str = body.to_string();
     let request = format!(
         "PUT {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_str}",
         body_str.len(),
     );
 
-    let mut stream = UnixStream::connect(socket_path)
+    let stream = UnixStream::connect(socket_path)
         .await
         .with_context(|| format!("connect to Firecracker socket {socket_path}"))?;
 
-    stream
+    let (reader, mut writer) = stream.into_split();
+
+    writer
         .write_all(request.as_bytes())
         .await
         .context("write HTTP request")?;
 
+    // Signal EOF on the write side so Firecracker knows the request is complete
+    // and can send its response without waiting for more data.
+    writer.shutdown().await.context("shutdown write half")?;
+
     // Read the status line to check for errors.
-    let mut reader = BufReader::new(&mut stream);
+    let mut reader = BufReader::new(reader);
     let mut status_line = String::new();
     reader
         .read_line(&mut status_line)
@@ -177,6 +185,8 @@ async fn api_put(socket_path: &str, path: &str, body: Value) -> Result<()> {
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
+
+    debug!("firecracker: PUT {path} → {status_code}");
 
     if !(200..300).contains(&status_code) {
         // Read rest of response for the error body.
