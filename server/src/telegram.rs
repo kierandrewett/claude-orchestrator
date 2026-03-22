@@ -277,13 +277,39 @@ async fn handle_message(
     };
 
     let session_id = if let Some(id) = session_id {
-        app_state
-            .send_to_client(&S2C::SendInput {
-                session_id: id.clone(),
-                text,
-            })
-            .await;
-        id
+        // Check if the session actually got started by the client. If it's still
+        // Pending it means StartSession was sent when the client was disconnected
+        // and was never received — treat it as a dead session and create a fresh one.
+        let still_pending = {
+            let sessions = app_state.sessions.read().await;
+            sessions
+                .get(&id)
+                .map(|b| b.info.status == SessionStatus::Pending)
+                .unwrap_or(true)
+        };
+
+        if still_pending {
+            warn!("telegram: session {id} is still pending (client was likely disconnected), creating fresh session");
+            states.write().await.remove(&chat_id.0);
+            let new_id = create_session(&app_state, chat_id.0, Some(text)).await;
+            states.write().await.insert(
+                chat_id.0,
+                ChatState {
+                    session_id: new_id.clone(),
+                    task_reply_to: None,
+                    created_at: Instant::now(),
+                },
+            );
+            new_id
+        } else {
+            app_state
+                .send_to_client(&S2C::SendInput {
+                    session_id: id.clone(),
+                    text,
+                })
+                .await;
+            id
+        }
     } else {
         // No active session — create one with the first message as initial prompt.
         let id = create_session(&app_state, chat_id.0, Some(text)).await;
