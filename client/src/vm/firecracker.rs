@@ -150,10 +150,18 @@ impl FirecrackerVm {
 
 /// Sends a PUT request to the Firecracker API socket.
 async fn api_put(socket_path: &str, path: &str, body: Value) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(5), api_put_inner(socket_path, path, body))
+        .await
+        .with_context(|| format!("PUT {path} timed out after 5s"))?
+}
+
+async fn api_put_inner(socket_path: &str, path: &str, body: Value) -> Result<()> {
     debug!("firecracker: PUT {path}");
     let body_str = body.to_string();
+    // Use keep-alive (HTTP/1.1 default) — Firecracker's micro-http RSTs on
+    // Connection: close. Each api_put opens its own connection anyway.
     let request = format!(
-        "PUT {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_str}",
+        "PUT {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body_str}",
         body_str.len(),
     );
 
@@ -195,17 +203,14 @@ async fn api_put(socket_path: &str, path: &str, body: Value) -> Result<()> {
 
 async fn wait_for_socket(path: &str, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
-    loop {
+    while !Path::new(path).exists() {
         if Instant::now() > deadline {
-            anyhow::bail!("Firecracker API socket {path} did not become ready within {}s", timeout.as_secs());
+            anyhow::bail!("Firecracker API socket {path} did not appear within {}s", timeout.as_secs());
         }
-        // Test actual connectivity, not just file existence — the socket file
-        // can appear before micro-http is ready to accept connections.
-        if Path::new(path).exists() {
-            if UnixStream::connect(path).await.is_ok() {
-                return Ok(());
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
+    // Give micro-http a moment to finish binding after the socket file appears,
+    // without opening a throwaway connection that would occupy its event loop.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    Ok(())
 }
