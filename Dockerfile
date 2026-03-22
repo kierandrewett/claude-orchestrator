@@ -14,21 +14,24 @@ WORKDIR /app
 # Copy workspace manifests first so cargo can fetch dependencies.
 # Stub out source files so the dependency layer is cached independently.
 COPY Cargo.toml Cargo.lock ./
-COPY shared/Cargo.toml   ./shared/
-COPY server/Cargo.toml   ./server/
-COPY client/Cargo.toml   ./client/
+COPY shared/Cargo.toml    ./shared/
+COPY server/Cargo.toml    ./server/
+COPY client/Cargo.toml    ./client/
+COPY vm-agent/Cargo.toml  ./vm-agent/
 
-RUN mkdir -p shared/src server/src client/src \
+RUN mkdir -p shared/src server/src client/src vm-agent/src \
     && echo 'pub fn dummy() {}' > shared/src/lib.rs \
     && echo 'fn main() {}' > server/src/main.rs \
     && echo 'fn main() {}' > client/src/main.rs \
+    && echo 'fn main() {}' > vm-agent/src/main.rs \
     && cargo build --release -p claude-server 2>/dev/null || true \
-    && rm -rf shared/src server/src client/src
+    && rm -rf shared/src server/src client/src vm-agent/src
 
 # Now build for real
-COPY shared/ ./shared/
-COPY server/  ./server/
-COPY client/  ./client/
+COPY shared/    ./shared/
+COPY server/    ./server/
+COPY client/    ./client/
+COPY vm-agent/  ./vm-agent/
 # Touch source files so Cargo sees them as newer than the stub artifacts.
 RUN find shared/src server/src -name '*.rs' | xargs touch \
     && cargo build --release -p claude-server
