@@ -4,6 +4,7 @@ mod ntfy;
 mod persist;
 mod protocol;
 mod state;
+mod telegram;
 
 use std::sync::Arc;
 
@@ -63,6 +64,14 @@ async fn main() -> std::io::Result<()> {
 
     info!("claude-server: data_dir={data_dir}");
     app_state.load_from_disk().await;
+
+    // Start Telegram bot if token is configured
+    if let Ok(token) = std::env::var("TELEGRAM_BOT_TOKEN") {
+        let tg_state = app_state.clone();
+        tokio::spawn(async move {
+            telegram::start(tg_state, token).await;
+        });
+    }
 
     info!("claude-server starting on {bind_addr}");
 

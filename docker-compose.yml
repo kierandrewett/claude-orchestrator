@@ -12,6 +12,7 @@ services:
             PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
             MAX_BUFFER: ${MAX_BUFFER:-5000}
             DATA_DIR: /app/data
+            TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
         volumes:
             - claude_data:/app/data
         restart: unless-stopped

@@ -146,7 +146,7 @@ export function InputBar({ sessionId, onKill, pending = false }: Props) {
     }, [text]);
 
     return (
-        <div className="relative border-t border-zinc-800/80 bg-zinc-950 px-3 pt-3 pb-4">
+        <div className="relative border-t border-zinc-800/80 bg-zinc-950 px-3 py-2.5">
             {/* Slash command menu */}
             {showCommands && (
                 <div className="absolute bottom-full left-3 right-3 mb-2 bg-zinc-900 border border-zinc-700/50 rounded-xl shadow-2xl overflow-hidden z-10">
@@ -187,7 +187,7 @@ export function InputBar({ sessionId, onKill, pending = false }: Props) {
                     rows={1}
                     disabled={pending}
                     className="flex-1 bg-transparent text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none resize-none font-sans leading-relaxed disabled:opacity-50"
-                    style={{ minHeight: '24px', maxHeight: '180px' }}
+                    style={{ minHeight: '24px', maxHeight: '180px', fontSize: '16px' }}
                 />
 
                 <div className="flex items-center gap-1 shrink-0 pb-0.5">
@@ -223,9 +223,6 @@ export function InputBar({ sessionId, onKill, pending = false }: Props) {
                 </div>
             </div>
 
-            <p className="mt-1.5 text-[10px] text-zinc-700 text-center">
-                Enter to send · Shift+Enter for newline · Tab to complete
-            </p>
         </div>
     );
 }

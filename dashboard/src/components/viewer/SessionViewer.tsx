@@ -1,7 +1,6 @@
-import { useEffect } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { ArrowLeft, FolderOpen, Square } from 'lucide-react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation } from '@tanstack/react-query';
 import { fetchSessions, fetchHistory, killSession } from '../../api/client';
 import { sessionRoute } from '../../router';
 import { cn, getStatusBgColor, getStatusDot } from '../../lib/utils';
@@ -13,9 +12,7 @@ import type { SessionInfo, ClaudeEvent } from '../../types';
 export function SessionViewer() {
     const { id } = sessionRoute.useParams();
     const navigate = useNavigate();
-    const queryClient = useQueryClient();
 
-    // Get session from the sessions list cache
     const { data: sessionsData } = useQuery({
         queryKey: ['sessions'],
         queryFn: fetchSessions,
@@ -23,7 +20,8 @@ export function SessionViewer() {
     });
     const session: SessionInfo | undefined = sessionsData?.sessions.find((s) => s.id === id);
 
-    // Fetch history on mount (SSE will append new events)
+    // Fetch history — staleTime: Infinity means we use the cached version if available.
+    // SSE appends new events to the cache so we never lose messages on re-navigation.
     const { data: historyData } = useQuery({
         queryKey: ['history', id],
         queryFn: () => fetchHistory(id),
@@ -31,12 +29,6 @@ export function SessionViewer() {
         enabled: !!id,
     });
     const events: ClaudeEvent[] = historyData?.events ?? [];
-
-    // Reset scroll / history when navigating to a different session
-    useEffect(() => {
-        queryClient.removeQueries({ queryKey: ['history', id] });
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [id]);
 
     const killMutation = useMutation({ mutationFn: () => killSession(id) });
 
@@ -68,13 +60,13 @@ export function SessionViewer() {
 
     return (
         <div className="flex flex-col h-full overflow-hidden">
-            {/* Session header */}
-            <div className="flex items-center gap-2 px-4 py-2.5 border-b border-zinc-800/80 bg-zinc-950 shrink-0">
+            {/* Session header — sticky */}
+            <div className="flex items-center gap-2 px-3 py-2.5 border-b border-zinc-800/80 bg-zinc-950 shrink-0">
                 <button
                     onClick={() => void navigate({ to: '/' })}
-                    className="lg:hidden p-1 rounded text-zinc-600 hover:text-zinc-300 hover:bg-zinc-800 transition-colors"
+                    className="lg:hidden p-1.5 rounded-lg text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
                 >
-                    <ArrowLeft size={15} />
+                    <ArrowLeft size={16} />
                 </button>
 
                 <div className="flex-1 min-w-0">

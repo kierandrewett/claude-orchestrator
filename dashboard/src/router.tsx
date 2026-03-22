@@ -1,56 +1,8 @@
-import {
-    createRouter,
-    createRoute,
-    createRootRoute,
-    Outlet,
-    useParams,
-    useNavigate,
-} from '@tanstack/react-router';
-import { List, MessageSquare } from 'lucide-react';
+import { createRouter, createRoute, createRootRoute, Outlet } from '@tanstack/react-router';
 import { useSSE } from './hooks/useSSE';
 import { Header } from './components/layout/Header';
 import { Sidebar } from './components/layout/Sidebar';
 import { SessionViewer } from './components/viewer/SessionViewer';
-import { cn } from './lib/utils';
-
-// ── Mobile bottom nav ─────────────────────────────────────────────────────────
-
-function MobileNav() {
-    const params = useParams({ strict: false }) as Record<string, string>;
-    const activeId = params.id;
-    const navigate = useNavigate();
-    const onSession = !!activeId;
-
-    return (
-        <nav className="lg:hidden flex shrink-0 border-t border-zinc-800 bg-zinc-950">
-            <button
-                onClick={() => void navigate({ to: '/' })}
-                className={cn(
-                    'flex-1 flex flex-col items-center gap-1 py-3 text-[11px] font-medium transition-colors',
-                    !onSession ? 'text-zinc-200' : 'text-zinc-500 hover:text-zinc-400',
-                )}
-            >
-                <List size={19} />
-                Sessions
-            </button>
-            <button
-                onClick={() =>
-                    activeId &&
-                    void navigate({ to: '/session/$id', params: { id: activeId } })
-                }
-                disabled={!activeId}
-                className={cn(
-                    'flex-1 flex flex-col items-center gap-1 py-3 text-[11px] font-medium transition-colors',
-                    onSession ? 'text-zinc-200' : 'text-zinc-500',
-                    !activeId && 'opacity-30 cursor-not-allowed',
-                )}
-            >
-                <MessageSquare size={19} />
-                Chat
-            </button>
-        </nav>
-    );
-}
 
 // ── Root layout ───────────────────────────────────────────────────────────────
 
@@ -70,8 +22,6 @@ function RootLayout() {
                     <Outlet />
                 </main>
             </div>
-
-            <MobileNav />
         </div>
     );
 }
