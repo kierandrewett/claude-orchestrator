@@ -42,8 +42,8 @@ pub struct VmConfig {
     #[serde(default)]
     pub enabled: bool,
 
-    /// Set to true to give the VM internet access via NAT (requires root/CAP_NET_ADMIN).
-    #[serde(default)]
+    /// Set to true to give the VM internet access via slirp4netns (rootless).
+    #[serde(default = "default_true")]
     pub network_enabled: bool,
 
     /// Path to the `firecracker` binary.
@@ -69,6 +69,10 @@ pub struct VmConfig {
 
     #[serde(default)]
     pub tools: ToolsConfig,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_vcpus() -> u32 {
@@ -104,7 +108,7 @@ impl VmConfig {
             .unwrap_or_else(|_| "/usr/bin/firecracker".to_string());
         Self {
             enabled: false,
-            network_enabled: false,
+            network_enabled: true,
             firecracker_path,
             kernel_path: data_dir.join("vmlinux").to_string_lossy().into_owned(),
             rootfs_path: data_dir.join("rootfs.ext4").to_string_lossy().into_owned(),

@@ -146,7 +146,7 @@ impl Default for VmConfigProto {
     fn default() -> Self {
         Self {
             enabled: false,
-            network_enabled: false,
+            network_enabled: true,
             firecracker_path: String::new(),
             kernel_path: String::new(),
             rootfs_path: String::new(),
