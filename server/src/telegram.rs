@@ -440,44 +440,28 @@ async fn collect_and_send(
                     } if sid == session_id => {
                         let evt_type =
                             event.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                        info!("telegram: session {session_id} event type={evt_type}");
 
                         match evt_type {
-                            "content_block_delta" => {
-                                if let Some(delta) =
-                                    event.pointer("/delta/text").and_then(|t| t.as_str())
-                                {
-                                    text.push_str(delta);
-                                }
-                            }
-                            "message_stop" | "result" => {
-                                info!("telegram: session {session_id} got {evt_type}, sending {} chars", text.len());
-                                break;
-                            }
-                            // Turn-complete format
-                            "assistant" => {
-                                info!("telegram: assistant event = {}", serde_json::to_string(&event).unwrap_or_default());
-                                let content = event
-                                    .pointer("/message/content")
-                                    .or_else(|| event.get("content"))
-                                    .and_then(|c| c.as_array());
-
-                                if let Some(content) = content {
-                                    for block in content {
-                                        if block
-                                            .get("type")
-                                            .and_then(|t| t.as_str())
-                                            == Some("text")
+                            // Streaming events are wrapped in stream_event — unwrap and
+                            // extract text deltas from inner content_block_delta events.
+                            "stream_event" => {
+                                if let Some(inner) = event.get("event") {
+                                    if inner
+                                        .get("type")
+                                        .and_then(|t| t.as_str())
+                                        == Some("content_block_delta")
+                                    {
+                                        if let Some(t) =
+                                            inner.pointer("/delta/text").and_then(|t| t.as_str())
                                         {
-                                            if let Some(t) =
-                                                block.get("text").and_then(|t| t.as_str())
-                                            {
-                                                text.push_str(t);
-                                            }
+                                            text.push_str(t);
                                         }
                                     }
                                 }
-                                info!("telegram: session {session_id} got assistant turn-complete, sending {} chars", text.len());
+                            }
+                            // result marks the end of the entire Claude turn (incl. all tool use)
+                            "result" => {
+                                info!("telegram: session {session_id} result, sending {} chars", text.len());
                                 break;
                             }
                             _ => {}
