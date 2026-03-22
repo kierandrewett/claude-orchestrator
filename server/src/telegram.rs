@@ -277,19 +277,21 @@ async fn handle_message(
     };
 
     let session_id = if let Some(id) = session_id {
-        // Check if the session actually got started by the client. If it's still
-        // Pending it means StartSession was sent when the client was disconnected
-        // and was never received — treat it as a dead session and create a fresh one.
-        let still_pending = {
+        // If the session never started or has ended (killed/failed/completed),
+        // discard it and create a fresh one.
+        let is_dead = {
             let sessions = app_state.sessions.read().await;
             sessions
                 .get(&id)
-                .map(|b| b.info.status == SessionStatus::Pending)
+                .map(|b| matches!(
+                    b.info.status,
+                    SessionStatus::Pending | SessionStatus::Completed | SessionStatus::Failed | SessionStatus::Killed
+                ))
                 .unwrap_or(true)
         };
 
-        if still_pending {
-            warn!("telegram: session {id} is still pending (client was likely disconnected), creating fresh session");
+        if is_dead {
+            warn!("telegram: session {id} is dead, creating fresh session");
             states.write().await.remove(&chat_id.0);
             let new_id = create_session(&app_state, chat_id.0, Some(text)).await;
             states.write().await.insert(
