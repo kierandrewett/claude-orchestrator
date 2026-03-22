@@ -195,14 +195,45 @@ mount -t tmpfs tmpfs /tmp
 # Configure loopback
 ip link set lo up 2>/dev/null || true
 
-# Parse vm_mounts= from kernel command line
-# Format: vm_mounts=/dev/vdb:/guest/path,/dev/vdc:/other/path
+# Parse vm_net= and vm_mounts= from kernel command line
+# vm_net format: vm_net=<guest_ip>/<prefix>,gw=<gateway>,dns=<dns>
+# vm_mounts format: vm_mounts=/dev/vdb:/guest/path,/dev/vdc:/other/path
+VM_NET=""
 MOUNTS=""
 for arg in $(cat /proc/cmdline); do
     case "$arg" in
+        vm_net=*)    VM_NET="${arg#vm_net=}" ;;
         vm_mounts=*) MOUNTS="${arg#vm_mounts=}" ;;
     esac
 done
+
+# Configure network if vm_net= was provided
+if [ -n "$VM_NET" ]; then
+    _ip_prefix="${VM_NET%%,*}"
+    _rest="${VM_NET#*,}"
+    _gw="${_rest%%,*}"
+    _gw="${_gw#gw=}"
+    _dns="${_rest#*,}"
+    _dns="${_dns#dns=}"
+
+    # Wait for eth0 to appear (virtio-net may take a moment)
+    _w=0
+    while ! ip link show eth0 >/dev/null 2>&1 && [ $_w -lt 30 ]; do
+        sleep 0.1
+        _w=$((_w + 1))
+    done
+
+    if ip link show eth0 >/dev/null 2>&1; then
+        ip addr add "$_ip_prefix" dev eth0 \
+            && ip link set eth0 up \
+            && ip route add default via "$_gw" \
+            && echo "init: network up: $_ip_prefix gw=$_gw" \
+            || echo "init: WARNING: network configuration failed"
+        printf 'nameserver %s\n' "$_dns" > /etc/resolv.conf
+    else
+        echo "init: WARNING: eth0 did not appear, skipping network config"
+    fi
+fi
 
 # Mount each volume (wait up to 2s for block device to appear)
 if [ -n "$MOUNTS" ]; then

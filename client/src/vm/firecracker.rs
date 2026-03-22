@@ -5,8 +5,10 @@ use std::num::NonZeroU64;
 use tokio::process::{Child, Command};
 use tracing::info;
 
-use firecracker::sdk::types::{BootSource, Drive, DriveCacheType, DriveIoEngine, MachineConfiguration, Vsock};
+use firecracker::sdk::types::{BootSource, Drive, DriveCacheType, DriveIoEngine, MachineConfiguration, NetworkInterface, Vsock};
 use firecracker::sdk::VmBuilder;
+
+use super::network::NetworkSpec;
 
 /// A running Firecracker VM. The child process is killed on drop.
 pub struct FirecrackerVm {
@@ -33,6 +35,7 @@ impl FirecrackerVm {
         vcpus: u32,
         memory_mb: u32,
         boot_args: &str,
+        net: Option<&NetworkSpec>,
     ) -> Result<Self> {
         // Remove stale sockets from a previous run.
         let _ = std::fs::remove_file(api_socket);
@@ -94,6 +97,16 @@ impl FirecrackerVm {
                 uds_path: vsock_socket.to_string(),
                 vsock_id: None,
             });
+
+        if let Some(n) = net {
+            builder = builder.network_interface(NetworkInterface {
+                iface_id: "eth0".to_string(),
+                guest_mac: Some(n.guest_mac.clone()),
+                host_dev_name: n.tap_name.clone(),
+                rx_rate_limiter: None,
+                tx_rate_limiter: None,
+            });
+        }
 
         for spec in drives {
             builder = builder.drive(Drive {

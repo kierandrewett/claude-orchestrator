@@ -72,7 +72,7 @@ enum Cmd {
     // ── VM management ──
     #[command(description = "Save auto-detected VM config to disk")]
     Vminit,
-    #[command(description = "Set a VM path field: /vmset firecracker|kernel|rootfs|datadir|vcpus|memory <value>")]
+    #[command(description = "Set a VM field: /vmset firecracker|kernel|rootfs|datadir|vcpus|memory|network <value>")]
     Vmset(String),
     #[command(description = "Show VM config")]
     Vmconfig,
@@ -343,6 +343,24 @@ async fn handle_command(
             let field = parts[0].to_lowercase();
             let value = parts[1].trim().to_string();
             match field.as_str() {
+                "network" => match value.as_str() {
+                    "on" | "true" | "1" | "yes" => {
+                        vm_update_config(&bot, chat_id, &app_state, |c| {
+                            c.network_enabled = true;
+                        })
+                        .await?;
+                    }
+                    "off" | "false" | "0" | "no" => {
+                        vm_update_config(&bot, chat_id, &app_state, |c| {
+                            c.network_enabled = false;
+                        })
+                        .await?;
+                    }
+                    _ => {
+                        bot.send_message(chat_id, "❌ network value must be on or off")
+                            .await?;
+                    }
+                },
                 "firecracker" => {
                     vm_update_config(&bot, chat_id, &app_state, move |c| {
                         c.firecracker_path = value;
@@ -393,7 +411,7 @@ async fn handle_command(
                 _ => {
                     bot.send_message(
                         chat_id,
-                        "❌ Unknown field. Valid fields: firecracker, kernel, rootfs, datadir, vcpus, memory",
+                        "❌ Unknown field. Valid fields: firecracker, kernel, rootfs, datadir, vcpus, memory, network",
                     )
                     .await?;
                 }
@@ -882,8 +900,10 @@ where
 /// Formats a `VmConfigProto` as Telegram HTML.
 fn format_vm_config(cfg: &VmConfigProto) -> String {
     let status = if cfg.enabled { "✅ enabled" } else { "❌ disabled" };
+    let net_status = if cfg.network_enabled { "✅ on" } else { "❌ off" };
     let mut lines = vec![
         format!("🖥 <b>VM Config</b> — {status}"),
+        format!("  Network: {net_status}"),
         format!("  vCPUs: <code>{}</code>  RAM: <code>{}MB</code>", cfg.vcpus, cfg.memory_mb),
         format!("  Kernel: <code>{}</code>", escape_html(&cfg.kernel_path)),
         format!("  Rootfs: <code>{}</code>", escape_html(&cfg.rootfs_path)),

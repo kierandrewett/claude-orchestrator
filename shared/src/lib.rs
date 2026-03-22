@@ -131,6 +131,7 @@ pub struct ToolsConfigProto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmConfigProto {
     pub enabled: bool,
+    pub network_enabled: bool,
     pub firecracker_path: String,
     pub kernel_path: String,
     pub rootfs_path: String,
@@ -145,6 +146,7 @@ impl Default for VmConfigProto {
     fn default() -> Self {
         Self {
             enabled: false,
+            network_enabled: false,
             firecracker_path: String::new(),
             kernel_path: String::new(),
             rootfs_path: String::new(),

@@ -42,6 +42,10 @@ pub struct VmConfig {
     #[serde(default)]
     pub enabled: bool,
 
+    /// Set to true to give the VM internet access via NAT (requires root/CAP_NET_ADMIN).
+    #[serde(default)]
+    pub network_enabled: bool,
+
     /// Path to the `firecracker` binary.
     pub firecracker_path: String,
 
@@ -100,6 +104,7 @@ impl VmConfig {
             .unwrap_or_else(|_| "/usr/bin/firecracker".to_string());
         Self {
             enabled: false,
+            network_enabled: false,
             firecracker_path,
             kernel_path: data_dir.join("vmlinux").to_string_lossy().into_owned(),
             rootfs_path: data_dir.join("rootfs.ext4").to_string_lossy().into_owned(),
@@ -150,6 +155,7 @@ impl From<VmConfig> for VmConfigProto {
     fn from(c: VmConfig) -> Self {
         VmConfigProto {
             enabled: c.enabled,
+            network_enabled: c.network_enabled,
             firecracker_path: c.firecracker_path,
             kernel_path: c.kernel_path,
             rootfs_path: c.rootfs_path,
@@ -178,6 +184,7 @@ impl From<VmConfigProto> for VmConfig {
     fn from(p: VmConfigProto) -> Self {
         VmConfig {
             enabled: p.enabled,
+            network_enabled: p.network_enabled,
             firecracker_path: p.firecracker_path,
             kernel_path: p.kernel_path,
             rootfs_path: p.rootfs_path,
