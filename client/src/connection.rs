@@ -81,13 +81,25 @@ async fn connect_and_run(
 ) -> anyhow::Result<()> {
     info!("connecting to {}", config.server_url);
 
-    // Build an HTTP upgrade request with the Bearer auth header
+    // Build an HTTP upgrade request with the required WebSocket headers.
+    // tungstenite does not inject these automatically when given a custom Request.
+    let uri: tokio_tungstenite::tungstenite::http::Uri = config.server_url
+        .parse()
+        .context("invalid SERVER_URL")?;
+    let host = uri.host().unwrap_or("localhost").to_string();
+    let host = match uri.port_u16() {
+        Some(p) => format!("{host}:{p}"),
+        None => host,
+    };
+    let key = tokio_tungstenite::tungstenite::handshake::client::generate_key();
     let request = tokio_tungstenite::tungstenite::http::Request::builder()
-        .uri(&config.server_url)
-        .header(
-            "Authorization",
-            format!("Bearer {}", config.client_token),
-        )
+        .uri(uri)
+        .header("Host", host)
+        .header("Authorization", format!("Bearer {}", config.client_token))
+        .header("Upgrade", "websocket")
+        .header("Connection", "Upgrade")
+        .header("Sec-WebSocket-Key", key)
+        .header("Sec-WebSocket-Version", "13")
         .body(())
         .context("failed to build HTTP upgrade request")?;
 

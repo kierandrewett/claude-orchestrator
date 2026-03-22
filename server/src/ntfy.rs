@@ -14,7 +14,6 @@ pub enum Phase {
     Reading,
     Writing,
     Running,
-    Testing,
 }
 
 impl Phase {
@@ -25,7 +24,6 @@ impl Phase {
             Phase::Reading  => "📂",
             Phase::Writing  => "✍️",
             Phase::Running  => "⚙️",
-            Phase::Testing  => "🧪",
         }
     }
     fn label(&self) -> &'static str {
@@ -35,7 +33,6 @@ impl Phase {
             Phase::Reading  => "Reading",
             Phase::Writing  => "Writing",
             Phase::Running  => "Running",
-            Phase::Testing  => "Testing",
         }
     }
 }

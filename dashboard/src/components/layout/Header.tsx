@@ -11,7 +11,7 @@ export function Header({ onMenuClick }: HeaderProps) {
     const clientStatus = useSessionsStore((s) => s.clientStatus);
 
     return (
-        <header className="h-12 flex items-center px-4 border-b border-zinc-800 bg-zinc-900 shrink-0 gap-3 z-10">
+        <header className="relative h-12 flex items-center px-4 border-b border-zinc-800 bg-zinc-900 shrink-0 gap-3 z-40">
             {/* Mobile menu button */}
             <button
                 onClick={onMenuClick}

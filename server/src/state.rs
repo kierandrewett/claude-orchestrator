@@ -41,7 +41,6 @@ pub struct AppState {
     pub sessions: RwLock<HashMap<String, SessionBuffer>>,
     pub dashboards: RwLock<Vec<WsSession>>,
     pub commands: RwLock<Vec<crate::protocol::SlashCommand>>,  // current slash command list from client
-    pub http: reqwest::Client,
     pub store: Arc<crate::persist::Store>,
     pub pending_resumes: RwLock<Vec<SessionInfo>>,
 }
@@ -75,7 +74,6 @@ impl AppState {
             sessions: RwLock::new(HashMap::new()),
             dashboards: RwLock::new(Vec::new()),
             commands: RwLock::new(Vec::new()),
-            http: reqwest::Client::new(),
             store,
             pending_resumes: RwLock::new(Vec::new()),
         })
