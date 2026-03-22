@@ -353,6 +353,7 @@ async fn handle_text(state: &Arc<AppState>, text: &str) {
             session_id,
             exit_code,
             stats,
+            error,
         } => {
             info!(%session_id, %exit_code, "client_ws: SessionEnded");
 
@@ -385,6 +386,7 @@ async fn handle_text(state: &Arc<AppState>, text: &str) {
                         session_id: session_id.clone(),
                         stats: stats.clone(),
                         exit_code,
+                        error: error.clone(),
                     })
                     .await;
 

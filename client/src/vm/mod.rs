@@ -72,6 +72,7 @@ pub async fn run_vm_session(
             session_id: session_id.clone(),
             exit_code: -1,
             stats: SessionStats::default(),
+            error: None,
         },
     )
     .await;
@@ -286,6 +287,7 @@ async fn do_run(
             session_id: session_id.clone(),
             exit_code,
             stats,
+            error: None,
         },
     )
     .await;

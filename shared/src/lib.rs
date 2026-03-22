@@ -80,6 +80,8 @@ pub enum C2S {
         session_id: String,
         exit_code: i32,
         stats: SessionStats,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     CommandList {
         commands: Vec<SlashCommand>,
@@ -237,6 +239,8 @@ pub enum S2D {
         session_id: String,
         stats: SessionStats,
         exit_code: i32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     SessionHistory {
         session_id: String,

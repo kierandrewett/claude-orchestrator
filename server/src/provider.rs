@@ -339,10 +339,21 @@ pub async fn collect_and_respond(
                                     _ => {}
                                 }
                             }
-                            S2D::SessionEnded { session_id: sid, .. }
-                                if sid == session_id =>
-                            {
-                                info!("provider: session {session_id} ended");
+                            S2D::SessionEnded {
+                                session_id: sid,
+                                exit_code,
+                                error,
+                                ..
+                            } if sid == session_id => {
+                                if exit_code != 0 {
+                                    let msg = error.unwrap_or_else(|| {
+                                        format!("Session failed (exit code {exit_code})")
+                                    });
+                                    warn!("provider: session {session_id} failed: {msg}");
+                                    text = format!("❌ {msg}");
+                                } else {
+                                    info!("provider: session {session_id} ended");
+                                }
                                 break;
                             }
                             _ => {}

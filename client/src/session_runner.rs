@@ -36,20 +36,18 @@ pub async fn run_session(
     let vm_cfg = match crate::vm::config::VmConfig::load() {
         Ok(Some(cfg)) => cfg,
         Ok(None) => {
-            tracing::error!(
-                "session {}: no VM config found at {} — refusing to run on host",
-                config.session_id,
+            let msg = format!(
+                "No VM config found at {} — please create it before starting sessions.",
                 crate::vm::config::VmConfig::config_path().display(),
             );
-            abort_session(&ws_tx, config.session_id).await;
+            tracing::error!("session {}: {msg}", config.session_id);
+            abort_session(&ws_tx, config.session_id, &msg).await;
             return;
         }
         Err(e) => {
-            tracing::error!(
-                "session {}: failed to load VM config — refusing to run on host: {e}",
-                config.session_id,
-            );
-            abort_session(&ws_tx, config.session_id).await;
+            let msg = format!("Failed to load VM config: {e}");
+            tracing::error!("session {}: {msg}", config.session_id);
+            abort_session(&ws_tx, config.session_id, &msg).await;
             return;
         }
     };
@@ -57,13 +55,14 @@ pub async fn run_session(
     crate::vm::run_vm_session(config, ws_tx, cmd_rx, vm_cfg).await;
 }
 
-async fn abort_session(ws_tx: &Arc<Mutex<WsSink>>, session_id: String) {
+async fn abort_session(ws_tx: &Arc<Mutex<WsSink>>, session_id: String, error: &str) {
     ws_send(
         ws_tx,
         &crate::protocol::C2S::SessionEnded {
             session_id,
             exit_code: 1,
             stats: Default::default(),
+            error: Some(error.to_string()),
         },
     )
     .await;
