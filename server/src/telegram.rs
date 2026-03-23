@@ -29,6 +29,7 @@ use teloxide::{
     net::Download,
     prelude::*,
     types::{MessageId, ParseMode, ReactionType, ReplyParameters},
+    update_listeners::polling_default,
     utils::command::BotCommands,
 };
 use tokio::sync::RwLock;
@@ -194,10 +195,19 @@ impl MessagingProvider for TelegramProvider {
             )
             .branch(dptree::endpoint(handle_message));
 
+        // Use polling with a 10-second timeout so the long-poll window is
+        // short enough to avoid reqwest's default read timeout cutting it off.
+        let listener = polling_default(bot.clone()).await;
+
         Dispatcher::builder(bot, handler)
             .dependencies(dptree::deps![app_state, states, allowed])
             .build()
-            .dispatch()
+            .dispatch_with_listener(
+                listener,
+                teloxide::error_handlers::LoggingErrorHandler::with_custom_text(
+                    "telegram: update listener error",
+                ),
+            )
             .await;
     }
 }
