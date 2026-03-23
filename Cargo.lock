@@ -2327,7 +2327,6 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
- "memoffset",
 ]
 
 [[package]]
@@ -4472,26 +4471,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "vm-agent"
-version = "0.1.0"
-dependencies = [
- "libc",
- "serde",
- "serde_json",
- "vsock",
-]
-
-[[package]]
-name = "vsock"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b82aeb12ad864eb8cd26a6c21175d0bdc66d398584ee6c93c76964c3bcfc78ff"
-dependencies = [
- "libc",
- "nix",
-]
 
 [[package]]
 name = "walkdir"

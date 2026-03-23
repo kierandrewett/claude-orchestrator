@@ -11,29 +11,33 @@ FROM rust:1.88-slim AS server
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
-# Copy workspace manifests first so cargo can fetch dependencies.
-# Stub out source files so the dependency layer is cached independently.
+# Copy workspace manifests so cargo can fetch deps before copying all source.
 COPY Cargo.toml Cargo.lock ./
-COPY shared/Cargo.toml    ./shared/
-COPY server/Cargo.toml    ./server/
-COPY client/Cargo.toml    ./client/
-COPY vm-agent/Cargo.toml  ./vm-agent/
+COPY crates/server/Cargo.toml           ./crates/server/
+COPY crates/client/Cargo.toml           ./crates/client/
+COPY crates/shared/Cargo.toml           ./crates/shared/
+COPY crates/ndjson/Cargo.toml           ./crates/ndjson/
+COPY crates/events/Cargo.toml           ./crates/events/
+COPY crates/containers/Cargo.toml       ./crates/containers/
+COPY crates/orchestrator-llm/Cargo.toml ./crates/orchestrator-llm/
+COPY crates/backend-traits/Cargo.toml   ./crates/backend-traits/
+COPY crates/backend-telegram/Cargo.toml ./crates/backend-telegram/
+COPY crates/backend-discord/Cargo.toml  ./crates/backend-discord/
+COPY crates/backend-web/Cargo.toml      ./crates/backend-web/
+COPY crates/backend-stdio/Cargo.toml    ./crates/backend-stdio/
 
-RUN mkdir -p shared/src server/src client/src vm-agent/src \
-    && echo 'pub fn dummy() {}' > shared/src/lib.rs \
-    && echo 'fn main() {}' > server/src/main.rs \
-    && echo 'fn main() {}' > client/src/main.rs \
-    && echo 'fn main() {}' > vm-agent/src/main.rs \
-    && cargo build --release -p claude-server 2>/dev/null || true \
-    && rm -rf shared/src server/src client/src vm-agent/src
+RUN for dir in crates/server crates/client crates/ndjson crates/events crates/containers \
+        crates/orchestrator-llm crates/backend-traits crates/backend-telegram \
+        crates/backend-discord crates/backend-web crates/backend-stdio; do \
+        mkdir -p "$dir/src" && echo 'fn main() {}' > "$dir/src/main.rs"; \
+    done && \
+    mkdir -p crates/shared/src && echo 'pub fn dummy() {}' > crates/shared/src/lib.rs && \
+    cargo build --release -p claude-server 2>/dev/null || true && \
+    rm -rf crates/*/src
 
 # Now build for real
-COPY shared/    ./shared/
-COPY server/    ./server/
-COPY client/    ./client/
-COPY vm-agent/  ./vm-agent/
-# Touch source files so Cargo sees them as newer than the stub artifacts.
-RUN find shared/src server/src -name '*.rs' | xargs touch \
+COPY crates/ ./crates/
+RUN find crates/server/src crates/shared/src crates/events/src -name '*.rs' | xargs touch \
     && cargo build --release -p claude-server
 
 # ── Stage 3: Minimal runtime image ────────────────────────────────────────────
@@ -46,12 +50,7 @@ WORKDIR /app
 COPY --from=server /app/target/release/claude-server ./
 COPY --from=dashboard /app/dist ./static
 
-# Persist session data outside the container
 VOLUME ["/app/data"]
-
 EXPOSE 8080
-ENV HOST=0.0.0.0 \
-    PORT=8080 \
-    DATA_DIR=/app/data
 
-CMD ["./claude-server"]
+CMD ["./claude-server", "run"]
