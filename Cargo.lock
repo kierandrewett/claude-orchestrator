@@ -528,6 +528,7 @@ dependencies = [
  "futures-util",
  "gtk",
  "hostname",
+ "libc",
  "open",
  "serde",
  "serde_json",

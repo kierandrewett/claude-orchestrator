@@ -86,7 +86,7 @@ async fn do_run(
 
     // docker exec -i <container> claude --print ...
     let mut cmd = Command::new("docker");
-    cmd.args(["exec", "-i"]);
+    cmd.args(["exec", "-i", "-u", &host_uid_gid()]);
 
     // Working directory for this exec (may differ from container default).
     cmd.args(["-w", &config.default_cwd]);
@@ -116,12 +116,28 @@ async fn do_run(
 
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
 
     let mut child = cmd.spawn().context("spawn docker exec")?;
     let mut stdin = child.stdin.take().expect("stdin piped");
     let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
+
+    // Collect stderr in the background so we can include it in error reports.
+    let stderr_buf = Arc::new(tokio::sync::Mutex::new(String::new()));
+    {
+        let buf = Arc::clone(&stderr_buf);
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                warn!("docker exec stderr: {line}");
+                let mut b = buf.lock().await;
+                b.push_str(&line);
+                b.push('\n');
+            }
+        });
+    }
 
     // Send the initial prompt before anything else.
     if let Some(ref prompt) = config.initial_prompt {
@@ -226,13 +242,24 @@ async fn do_run(
         _ => { let _ = child.kill().await; -1 }
     };
 
+    let error = if exit_code != 0 {
+        let stderr_content = stderr_buf.lock().await;
+        if stderr_content.is_empty() {
+            Some(format!("claude exited with code {exit_code}"))
+        } else {
+            Some(format!("claude exited with code {exit_code}:\n{stderr_content}"))
+        }
+    } else {
+        None
+    };
+
     ws_send(
         ws_tx,
         &C2S::SessionEnded {
             session_id: session_id.clone(),
             exit_code,
             stats,
-            error: None,
+            error,
         },
     )
     .await;
@@ -333,6 +360,10 @@ async fn ensure_container(
     // Pass the current API key into the container environment.
     cmd.args(["--env", "ANTHROPIC_API_KEY"]);
 
+    // Run as the host user so bind-mounted directories have correct permissions
+    // and claude sees a non-root UID (required for --dangerously-skip-permissions).
+    cmd.args(["--user", &host_uid_gid()]);
+
     // Labels for lifecycle management.
     cmd.args([
         "--label", "claude.managed=true",
@@ -357,6 +388,15 @@ async fn ensure_container(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Returns "uid:gid" for the current process, used to run containers as the
+/// host user so bind mounts have correct permissions and Claude is non-root.
+fn host_uid_gid() -> String {
+    // Safety: getuid/getgid are always safe to call.
+    let uid = unsafe { libc::getuid() };
+    let gid = unsafe { libc::getgid() };
+    format!("{uid}:{gid}")
+}
 
 fn format_user_message(text: &str) -> String {
     let content_json = serde_json::to_string(text).unwrap_or_else(|_| format!("{text:?}"));
