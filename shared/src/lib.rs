@@ -100,6 +100,13 @@ pub enum C2S {
         success: bool,
         error: Option<String>,
     },
+    /// Result of a BuildImage request.
+    BuildImageResult {
+        request_id: String,
+        success: bool,
+        /// Last portion of docker build output (stdout+stderr), trimmed.
+        output: String,
+    },
 }
 
 // ── VM config wire types ───────────────────────────────────────────────────────
@@ -127,19 +134,28 @@ pub struct ToolsConfigProto {
     pub extra_packages: Vec<String>,
 }
 
-/// Wire-safe representation of the client's VM config.
+/// Wire-safe representation of the client's container config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmConfigProto {
     pub enabled: bool,
     pub network_enabled: bool,
-    pub firecracker_path: String,
-    pub kernel_path: String,
-    pub rootfs_path: String,
+    /// Docker image tag to use (and build) for sessions.
+    #[serde(default = "default_image")]
+    pub image: String,
+    /// Base image for the generated Dockerfile (FROM line).
+    #[serde(default = "default_base_image")]
+    pub base_image: String,
     pub data_dir: String,
-    pub vcpus: u32,
-    pub memory_mb: u32,
     pub mounts: Vec<VolumeMountProto>,
     pub tools: ToolsConfigProto,
+}
+
+fn default_image() -> String {
+    "claude-code:latest".to_string()
+}
+
+fn default_base_image() -> String {
+    "alpine:latest".to_string()
 }
 
 impl Default for VmConfigProto {
@@ -147,12 +163,9 @@ impl Default for VmConfigProto {
         Self {
             enabled: false,
             network_enabled: true,
-            firecracker_path: String::new(),
-            kernel_path: String::new(),
-            rootfs_path: String::new(),
+            image: default_image(),
+            base_image: default_base_image(),
             data_dir: String::new(),
-            vcpus: 2,
-            memory_mb: 2048,
             mounts: Vec::new(),
             tools: ToolsConfigProto::default(),
         }
@@ -164,6 +177,7 @@ impl Default for VmConfigProto {
 pub enum VmConfigResponse {
     Config(VmConfigProto),
     Ack { success: bool, error: Option<String> },
+    BuildResult { success: bool, output: String },
 }
 
 /// A file attached to a message, transferred from the Telegram bot to the client
@@ -213,6 +227,10 @@ pub enum S2C {
     SetVmConfig {
         request_id: String,
         config: VmConfigProto,
+    },
+    /// Ask the client to (re)build the Docker image from its Dockerfile.
+    BuildImage {
+        request_id: String,
     },
 }
 

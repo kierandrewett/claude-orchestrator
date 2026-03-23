@@ -79,6 +79,10 @@ fn main() -> anyhow::Result<()> {
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+        rt.spawn(async {
+            crate::vm::cleanup::startup_sweep().await;
+            crate::vm::cleanup::run().await;
+        });
         rt.block_on(connection::run_forever(
             config_clone,
             tray_state_bg,

@@ -1,252 +1,127 @@
-//! Alpine-based rootfs builder.
+//! Docker image builder for Claude sessions.
 //!
-//! Uses Docker to assemble an Alpine Linux root filesystem with the
-//! requested packages and the compiled `vm-agent` binary, then packages
-//! it as an ext4 image using `mke2fs -d`.
+//! Generates a Dockerfile at `~/.config/claude-client/Dockerfile` based on
+//! the current `VmConfig` (base image + extra packages), then builds it with
+//! `docker build -t <image>`.
 //!
-//! Requires on the host:
-//!   - `docker` (or `podman` aliased to `docker`)
-//!   - `mke2fs` with `-d` directory support (e2fsprogs ≥ 1.45)
+//! Requires `docker` on the host.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use tokio::process::Command;
 use tracing::info;
 
-/// Default Alpine packages always installed regardless of user config.
-const BASE_PACKAGES: &[&str] = &[
-    "alpine-base",
-    "busybox",
-    "openrc",
-    "e2fsprogs",
-    "bash",
-    "git",
-    "curl",
-    "ca-certificates",
-    "rsync",
-    "util-linux",
-];
+/// Always-installed packages (via the package manager detected from the base image).
+const ALWAYS_PACKAGES: &[&str] = &["git", "curl", "ca-certificates", "bash"];
 
-/// Build (or rebuild) the Alpine rootfs image at `rootfs_path`.
-///
-/// `extra_packages` are additional Alpine package names to install
-/// (e.g. `["nodejs", "python3", "ripgrep"]`).
-///
-/// `vm_agent_path` is the path to the compiled static vm-agent binary on
-/// the host; it is copied into `/usr/local/bin/vm-agent` in the rootfs.
-///
-/// If `rootfs_path` already exists it is overwritten.
-pub async fn build(
-    rootfs_path: &Path,
-    extra_packages: &[String],
-    vm_agent_path: &Path,
-) -> Result<()> {
-    anyhow::ensure!(
-        vm_agent_path.exists(),
-        "vm-agent binary not found at {} — run:\n  \
-         cargo build --release --target x86_64-unknown-linux-musl -p vm-agent",
-        vm_agent_path.display()
-    );
+// ---------------------------------------------------------------------------
+// Public helpers
+// ---------------------------------------------------------------------------
 
-    if let Some(dir) = rootfs_path.parent() {
-        tokio::fs::create_dir_all(dir).await?;
-    }
-
-    // Collect all packages
-    let mut pkgs: Vec<&str> = BASE_PACKAGES.to_vec();
-    let extra: Vec<&str> = extra_packages.iter().map(|s| s.as_str()).collect();
-    pkgs.extend_from_slice(&extra);
-    let pkg_list = pkgs.join(" ");
-
-    // Build the init script content
-    let init_script = INIT_SCRIPT;
-
-    // We build a Docker image, export its filesystem, then create an ext4 image.
-    let tag = "claude-vm-rootfs-builder:latest";
-
-    // Write Dockerfile to a temp file
-    let tmp_dir = tempfile::tempdir().context("create temp dir")?;
-    let dockerfile = format!(
-        r#"FROM alpine:3.20
-RUN apk add --no-cache {pkg_list}
-# Install claude (placeholder — user must pre-install or bind-mount)
-COPY vm-agent /usr/local/bin/vm-agent
-RUN chmod +x /usr/local/bin/vm-agent
-# Write the init script
-RUN printf '%s' '{init_escaped}' > /sbin/init && chmod +x /sbin/init
-# Ensure required directories
-RUN mkdir -p /dev /proc /sys /tmp /run /home/user
-"#,
-        init_escaped = init_script.replace('\'', "'\\''")
-    );
-
-    let dockerfile_path = tmp_dir.path().join("Dockerfile");
-    tokio::fs::write(&dockerfile_path, &dockerfile).await?;
-    tokio::fs::copy(vm_agent_path, tmp_dir.path().join("vm-agent")).await?;
-
-    info!("vm: building rootfs Docker image (packages: {})", pkg_list);
-
-    // docker build
-    let status = Command::new("docker")
-        .arg("build")
-        .arg("-t")
-        .arg(tag)
-        .arg(tmp_dir.path())
-        .status()
-        .await
-        .context("docker build")?;
-    anyhow::ensure!(status.success(), "docker build failed");
-
-    // Create a container, export its filesystem, pipe into mke2fs -d
-    // docker export <container> | mke2fs -t ext4 -d - <rootfs_path> <blocks>
-    // (1 GiB rootfs — 1048576 blocks of 1K each)
-    let rootfs_size_blocks = 1_048_576u64; // 1 GiB
-
-    info!("vm: exporting rootfs to {}", rootfs_path.display());
-
-    let docker_create = Command::new("docker")
-        .args(["create", "--name", "claude-vm-rootfs-tmp", tag])
-        .output()
-        .await
-        .context("docker create")?;
-    anyhow::ensure!(
-        docker_create.status.success(),
-        "docker create failed: {}",
-        String::from_utf8_lossy(&docker_create.stderr)
-    );
-    let container_id = String::from_utf8_lossy(&docker_create.stdout)
-        .trim()
-        .to_string();
-
-    // docker export | mke2fs -d - (pipe)
-    let export_result = (|| async {
-        let tmp_tar = tmp_dir.path().join("rootfs.tar");
-        let export_status = Command::new("docker")
-            .args(["export", "-o", tmp_tar.to_str().unwrap(), &container_id])
-            .status()
-            .await
-            .context("docker export")?;
-        anyhow::ensure!(export_status.success(), "docker export failed");
-
-        // Unpack tar into a temp dir
-        let rootfs_dir = tmp_dir.path().join("rootfs");
-        tokio::fs::create_dir_all(&rootfs_dir).await?;
-        let unpack = Command::new("tar")
-            .args(["-xf", tmp_tar.to_str().unwrap(), "-C", rootfs_dir.to_str().unwrap()])
-            .status()
-            .await
-            .context("tar -xf")?;
-        anyhow::ensure!(unpack.success(), "tar extraction failed");
-
-        // Create ext4 image from directory using mke2fs -d
-        let mke2fs = Command::new("mke2fs")
-            .arg("-t")
-            .arg("ext4")
-            .arg("-d")
-            .arg(&rootfs_dir)
-            .arg(rootfs_path)
-            .arg(rootfs_size_blocks.to_string())
-            .status()
-            .await
-            .context("mke2fs")?;
-        anyhow::ensure!(mke2fs.success(), "mke2fs -d failed");
-
-        Ok::<(), anyhow::Error>(())
-    })()
-    .await;
-
-    // Clean up the temp container regardless of result
-    let _ = Command::new("docker")
-        .args(["rm", "-f", &container_id])
-        .status()
-        .await;
-
-    export_result?;
-
-    info!("vm: rootfs built at {}", rootfs_path.display());
+/// Check that docker is available on the host.
+pub fn check_docker() -> Result<()> {
+    which::which("docker").context("docker not found in PATH")?;
     Ok(())
 }
 
-/// Returns a description of what `build` would do (for display to the user).
-pub fn describe(extra_packages: &[String]) -> String {
-    let mut pkgs: Vec<&str> = BASE_PACKAGES.to_vec();
+/// Write a Dockerfile to `path` based on `base_image` and `extra_packages`.
+///
+/// The Dockerfile installs Claude Code (via npm) plus any extra packages the
+/// user has configured. The package-manager commands adapt to the base image
+/// family (Alpine/Debian/Ubuntu → apk/apt-get).
+pub async fn write_dockerfile(
+    base_image: &str,
+    extra_packages: &[String],
+    path: &Path,
+) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        tokio::fs::create_dir_all(dir).await?;
+    }
+
+    let mut all_pkgs: Vec<&str> = ALWAYS_PACKAGES.to_vec();
     let extra: Vec<&str> = extra_packages.iter().map(|s| s.as_str()).collect();
-    pkgs.extend_from_slice(&extra);
-    format!(
-        "Alpine 3.20 base + packages: {}",
-        pkgs.join(", ")
-    )
+    all_pkgs.extend_from_slice(&extra);
+
+    let install_cmd = if base_image.contains("alpine") {
+        format!(
+            "RUN apk add --no-cache nodejs npm {}",
+            all_pkgs.join(" ")
+        )
+    } else {
+        // Assume Debian/Ubuntu for everything else
+        format!(
+            "RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm {} && rm -rf /var/lib/apt/lists/*",
+            all_pkgs.join(" ")
+        )
+    };
+
+    let dockerfile = format!(
+        "# Generated by claude-client — edit freely, then run /vmrebuild to apply.\nFROM {base_image}\n{install_cmd}\nRUN npm install -g @anthropic-ai/claude-code\n"
+    );
+
+    tokio::fs::write(path, &dockerfile)
+        .await
+        .with_context(|| format!("write Dockerfile to {}", path.display()))?;
+
+    info!("rootfs: wrote Dockerfile to {}", path.display());
+    Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Init script (written to /sbin/init inside the rootfs)
-// ---------------------------------------------------------------------------
+/// Build the Docker image from `dockerfile_path`, tagging it as `image`.
+///
+/// Captures combined stdout+stderr and returns the last 4 KB of output so the
+/// caller can report progress.
+pub async fn build(image: &str, dockerfile_path: &Path) -> Result<String> {
+    anyhow::ensure!(
+        dockerfile_path.exists(),
+        "Dockerfile not found at {} — run /vminit first",
+        dockerfile_path.display()
+    );
 
-const INIT_SCRIPT: &str = r#"#!/bin/sh
-set -e
+    info!("rootfs: building Docker image {image} from {}", dockerfile_path.display());
 
-# Mount essential virtual filesystems
-mount -t proc proc /proc
-mount -t sysfs sysfs /sys
-mount -t devtmpfs devtmpfs /dev 2>/dev/null || mdev -s
-mount -t tmpfs tmpfs /tmp
+    let output = Command::new("docker")
+        .args([
+            "build",
+            "--no-cache",
+            "-t",
+            image,
+            "-f",
+            dockerfile_path.to_str().unwrap(),
+            // Use the Dockerfile's directory as build context (usually has no
+            // extra files, so the context is tiny).
+            dockerfile_path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .to_str()
+                .unwrap(),
+        ])
+        .output()
+        .await
+        .context("docker build")?;
 
-# Configure loopback
-ip link set lo up 2>/dev/null || true
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Return last 4 KB for display.
+    let tail = if combined.len() > 4096 {
+        combined[combined.len() - 4096..].to_string()
+    } else {
+        combined.clone()
+    };
 
-# Parse vm_mounts= from kernel command line
-# vm_mounts format: vm_mounts=/dev/vdb:/guest/path,/dev/vdc:/other/path
-MOUNTS=""
-for arg in $(cat /proc/cmdline); do
-    case "$arg" in
-        vm_mounts=*) MOUNTS="${arg#vm_mounts=}" ;;
-    esac
-done
+    if output.status.success() {
+        info!("rootfs: image {image} built successfully");
+        Ok(tail)
+    } else {
+        anyhow::bail!("docker build failed:\n{tail}")
+    }
+}
 
-# Configure network via DHCP if eth0 appears.
-# slirp4netns (on the host) creates tap0 in our netns and provides
-# a DHCP server at 10.0.2.2; udhcpc sets up the route and resolv.conf.
-_w=0
-while ! ip link show eth0 >/dev/null 2>&1 && [ $_w -lt 20 ]; do
-    sleep 0.1
-    _w=$((_w + 1))
-done
-if ip link show eth0 >/dev/null 2>&1; then
-    ip link set eth0 up
-    udhcpc -i eth0 -n -q 2>/dev/null \
-        && echo "init: network up via DHCP" \
-        || echo "init: WARNING: DHCP failed, continuing without network"
-fi
-
-# Mount each volume (wait up to 2s for block device to appear)
-if [ -n "$MOUNTS" ]; then
-    IFS=','
-    for entry in $MOUNTS; do
-        DEV="${entry%%:*}"
-        MNTPT="${entry#*:}"
-        mkdir -p "$MNTPT"
-        waited=0
-        while [ ! -b "$DEV" ] && [ $waited -lt 20 ]; do
-            sleep 0.1
-            waited=$((waited + 1))
-        done
-        if [ -b "$DEV" ]; then
-            mount -t ext4 -o noatime "$DEV" "$MNTPT" \
-                && echo "init: mounted $DEV -> $MNTPT" \
-                || echo "init: WARNING: failed to mount $DEV -> $MNTPT"
-        else
-            echo "init: WARNING: $DEV did not appear, skipping"
-        fi
-    done
-    unset IFS
-fi
-
-# Set default HOME
-mkdir -p /home/user
-export HOME=/home/user
-export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
-
-echo "init: starting vm-agent"
-exec /usr/local/bin/vm-agent
-"#;
+/// Returns the default Dockerfile path (`~/.config/claude-client/Dockerfile`).
+pub fn dockerfile_path() -> PathBuf {
+    crate::vm::config::VmConfig::dockerfile_path()
+}

@@ -1,58 +1,42 @@
-//! Firecracker microVM session orchestrator.
+//! Docker container session runner.
 //!
-//! `run_vm_session` is a drop-in replacement for `session_runner::run_session`
-//! that executes Claude inside an isolated Alpine microVM.
+//! Each session runs inside a named Docker container:
 //!
-//! # Session flow
-//! 1. Prepare ext4 volume images (rsync host → image via fuse2fs).
-//! 2. Start Firecracker with rootfs + volume drives + vsock device.
-//! 3. Connect to the vsock port 5000 where `vm-agent` is listening.
-//! 4. Send a JSON config line so the agent knows which session to start.
-//! 5. Relay I/O: WebSocket commands → vsock stdin; vsock stdout → SessionEvent.
-//! 6. On EOF (claude exited) or KillSession: shut down VM, sync volumes back.
+//!   claude-<claude_session_id>
+//!
+//! The container is created once with `docker run -d sleep infinity` and then
+//! `docker exec -i` is used each time to run Claude inside it.  This means:
+//!
+//!   * Container filesystem state persists across session resumes.
+//!   * The same container is reused when a session is resumed (same
+//!     `claude_session_id`).
+//!   * The `sleep infinity` sentinel keeps the container alive between execs.
+//!
+//! A background cleanup task (see `cleanup`) removes containers that no longer
+//! have an active Claude process.
 
+pub mod cleanup;
 pub mod config;
-pub mod firecracker;
-pub mod network;
 pub mod rootfs;
-pub mod volume;
 
-use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use tokio::process::Command;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 
 use crate::protocol::{C2S, S2C, SessionStats};
 use crate::session_runner::{update_stats, ws_send, WsSink};
 use config::VmConfig;
-use firecracker::{DriveSpec, FirecrackerVm};
-
-// ---------------------------------------------------------------------------
-// Wire config sent to vm-agent over vsock
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize)]
-struct VmAgentConfig<'a> {
-    session_id: &'a str,
-    initial_prompt: Option<&'a str>,
-    claude_session_id: &'a str,
-    is_resume: bool,
-    cwd: &'a str,
-    extra_args: &'a [String],
-}
 
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Run a Claude session inside a Firecracker VM.
-/// Mirrors the signature and behaviour of `session_runner::run_session`.
 pub async fn run_vm_session(
     config: crate::session_runner::SessionConfig,
     ws_tx: Arc<Mutex<WsSink>>,
@@ -60,30 +44,33 @@ pub async fn run_vm_session(
     vm_cfg: VmConfig,
 ) {
     let session_id = config.session_id.clone();
-    info!("vm: starting session {session_id}");
+    info!("docker: starting session {session_id}");
 
-    if let Err(e) = do_run(&config, &ws_tx, &mut cmd_rx, &vm_cfg).await {
-        warn!("vm: session {session_id} error: {e:#}");
+    let result = do_run(&config, &ws_tx, &mut cmd_rx, &vm_cfg).await;
+
+    if let Err(e) = result {
+        warn!("docker: session {session_id} error: {e:#}");
+        ws_send(
+            &ws_tx,
+            &C2S::SessionEnded {
+                session_id,
+                exit_code: -1,
+                stats: SessionStats::default(),
+                error: Some(e.to_string()),
+            },
+        )
+        .await;
     }
-
-    // Always report session ended to the server.
-    ws_send(
-        &ws_tx,
-        &C2S::SessionEnded {
-            session_id: session_id.clone(),
-            exit_code: -1,
-            stats: SessionStats::default(),
-            error: None,
-        },
-    )
-    .await;
-
-    info!("vm: session {session_id} cleaned up");
 }
 
 // ---------------------------------------------------------------------------
 // Inner implementation
 // ---------------------------------------------------------------------------
+
+/// Canonical container name for a Claude session.
+pub fn container_name(claude_session_id: &str) -> String {
+    format!("claude-{claude_session_id}")
+}
 
 async fn do_run(
     config: &crate::session_runner::SessionConfig,
@@ -92,141 +79,112 @@ async fn do_run(
     vm_cfg: &VmConfig,
 ) -> Result<()> {
     let session_id = &config.session_id;
+    let name = container_name(&config.claude_session_id);
 
-    // --- 1. Prepare volume images (rsync host → ext4) ---
-    let mut drives: Vec<DriveSpec> = Vec::new();
-    for mount in &vm_cfg.mounts {
-        let image = vm_cfg.volume_image_path(&mount.name);
-        info!(
-            "vm: preparing volume '{}' ({} → {})",
-            mount.name, mount.host_path, mount.guest_path
-        );
-        volume::prepare(
-            &image,
-            &PathBuf::from(&mount.host_path),
-            mount.size_gb,
-            &mount.excludes,
-        )
-        .await
-        .with_context(|| format!("prepare volume '{}'", mount.name))?;
+    // Ensure the container exists and is running.
+    ensure_container(&name, config, vm_cfg).await?;
 
-        drives.push(DriveSpec {
-            drive_id: format!("vol{}", drives.len()),
-            image_path: image.to_string_lossy().into_owned(),
-            readonly: false,
-        });
+    // docker exec -i <container> claude --print ...
+    let mut cmd = Command::new("docker");
+    cmd.args(["exec", "-i"]);
+
+    // Working directory for this exec (may differ from container default).
+    cmd.args(["-w", &config.default_cwd]);
+
+    // Pass the current API key through to the exec'd process.
+    cmd.args(["-e", "ANTHROPIC_API_KEY"]);
+
+    cmd.arg(&name);
+
+    cmd.args([
+        "claude",
+        "--print",
+        "--input-format", "stream-json",
+        "--output-format", "stream-json",
+        "--dangerously-skip-permissions",
+    ]);
+
+    if config.is_resume {
+        cmd.args(["--resume", &config.claude_session_id]);
+    } else {
+        cmd.args(["--session-id", &config.claude_session_id]);
     }
 
-    // --- 2. Check networking tools are available if network is enabled ---
-    if vm_cfg.network_enabled {
-        network::check_tools().context("VM networking requires slirp4netns and unshare")?;
+    for arg in &config.extra_args {
+        cmd.arg(arg);
     }
 
-    // --- 3. Build boot args with mount map ---
-    let boot_args = build_boot_args(&vm_cfg.mounts);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
 
-    // --- 4. Unique per-session socket paths ---
-    let tmp = std::env::temp_dir();
-    let api_sock = tmp
-        .join(format!("fc-api-{session_id}.sock"))
-        .to_string_lossy()
-        .into_owned();
-    let vsock_sock = tmp
-        .join(format!("fc-vsock-{session_id}.sock"))
-        .to_string_lossy()
-        .into_owned();
+    let mut child = cmd.spawn().context("spawn docker exec")?;
+    let mut stdin = child.stdin.take().expect("stdin piped");
+    let stdout = child.stdout.take().expect("stdout piped");
 
-    // --- 5. Start Firecracker (with slirp4netns if networking is enabled) ---
-    let mut vm = FirecrackerVm::start(
-        &vm_cfg.firecracker_path,
-        &api_sock,
-        &vsock_sock,
-        &vm_cfg.kernel_path,
-        &vm_cfg.rootfs_path,
-        &drives,
-        vm_cfg.vcpus,
-        vm_cfg.memory_mb,
-        &boot_args,
-        vm_cfg.network_enabled,
-    )
-    .await
-    .context("start Firecracker VM")?;
+    // Send the initial prompt before anything else.
+    if let Some(ref prompt) = config.initial_prompt {
+        let line = format_user_message(prompt);
+        stdin
+            .write_all(line.as_bytes())
+            .await
+            .context("write initial prompt")?;
+    }
 
-    // Report that the session has started (use pid=0 for VM sessions)
     ws_send(
         ws_tx,
         &C2S::SessionStarted {
             session_id: session_id.clone(),
-            pid: 0,
+            pid: child.id().unwrap_or(0),
             cwd: config.default_cwd.clone(),
         },
     )
     .await;
 
-    // --- 5. Connect vsock (with retry — VM needs ~0.5s to boot) ---
-    let vsock_stream = connect_vsock(&vsock_sock, 5000, Duration::from_secs(15))
-        .await
-        .context("vsock CONNECT to vm-agent")?;
+    info!("docker: exec claude in container {name}");
 
-    let (vsock_rx, mut vsock_tx) = vsock_stream.into_split();
-
-    // --- 6. Send agent config ---
-    let agent_cfg = VmAgentConfig {
-        session_id: session_id,
-        initial_prompt: config.initial_prompt.as_deref(),
-        claude_session_id: &config.claude_session_id,
-        is_resume: config.is_resume,
-        cwd: &config.default_cwd,
-        extra_args: &config.extra_args,
-    };
-    let mut cfg_line = serde_json::to_string(&agent_cfg).context("serialize agent config")?;
-    cfg_line.push('\n');
-    vsock_tx
-        .write_all(cfg_line.as_bytes())
-        .await
-        .context("write agent config to vsock")?;
-
-    info!("vm: vm-agent configured, relaying I/O for session {session_id}");
-
-    // --- 7. I/O relay loop ---
     let mut stats = SessionStats::default();
-    let mut stdout_lines = BufReader::new(vsock_rx).lines();
+    let mut stdout_lines = BufReader::new(stdout).lines();
+
+    // Kill the session if no stdin has been received for this long.
+    const IDLE_TIMEOUT: Duration = Duration::from_secs(12 * 3600);
+    let idle_sleep = tokio::time::sleep(IDLE_TIMEOUT);
+    tokio::pin!(idle_sleep);
 
     loop {
         tokio::select! {
             biased;
 
-            // Incoming command from server
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(S2C::SendInput { text, .. }) => {
+                        idle_sleep.as_mut().reset(tokio::time::Instant::now() + IDLE_TIMEOUT);
                         let line = format_user_message(&text);
-                        if let Err(e) = vsock_tx.write_all(line.as_bytes()).await {
-                            warn!("vm: vsock write error: {e}");
+                        if let Err(e) = stdin.write_all(line.as_bytes()).await {
+                            warn!("docker: stdin write error: {e}");
                             break;
                         }
                     }
                     Some(S2C::SendInputWithFiles { text, files, .. }) => {
+                        idle_sleep.as_mut().reset(tokio::time::Instant::now() + IDLE_TIMEOUT);
                         let formatted = crate::session_runner::format_user_message_with_files(&text, &files).await;
                         if !formatted.is_empty() {
-                            if let Err(e) = vsock_tx.write_all(formatted.as_bytes()).await {
-                                warn!("vm: vsock write error (files): {e}");
+                            if let Err(e) = stdin.write_all(formatted.as_bytes()).await {
+                                warn!("docker: stdin write error: {e}");
                                 break;
                             }
                         }
                     }
                     Some(S2C::KillSession { .. }) => {
-                        info!("vm: KillSession received, shutting down VM");
-                        vm.kill().await;
-                        // Give VM a moment before we close the streams
-                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        info!("docker: KillSession — stopping exec");
+                        let _ = child.kill().await;
                         break;
                     }
                     Some(_) | None => break,
                 }
             }
 
-            // Output from claude (via vm-agent → vsock)
             line_result = stdout_lines.next_line() => {
                 match line_result {
                     Ok(Some(line)) => {
@@ -240,54 +198,34 @@ async fn do_run(
                                 }).await;
                             }
                             Err(e) => {
-                                warn!("vm: failed to parse stdout JSON: {e}\nline: {line}");
-                                let raw_event = serde_json::json!({
-                                    "type": "raw_text",
-                                    "text": line,
-                                });
-                                ws_send(ws_tx, &C2S::SessionEvent {
-                                    session_id: session_id.clone(),
-                                    event: raw_event,
-                                }).await;
+                                warn!("docker: failed to parse JSON: {e}\nline: {line}");
                             }
                         }
                     }
                     Ok(None) => {
-                        // EOF — claude exited
-                        info!("vm: vsock EOF, claude session ended");
+                        info!("docker: stdout EOF, session ended");
                         break;
                     }
                     Err(e) => {
-                        warn!("vm: vsock read error: {e}");
+                        warn!("docker: stdout read error: {e}");
                         break;
                     }
                 }
             }
+
+            _ = &mut idle_sleep => {
+                warn!("docker: session {session_id} idle for 12h with no stdin — terminating");
+                let _ = child.kill().await;
+                break;
+            }
         }
     }
 
-    // --- 8. Shutdown VM ---
-    vm.kill().await;
-    let exit_code = tokio::time::timeout(Duration::from_secs(10), vm.wait())
-        .await
-        .unwrap_or(-1);
+    let exit_code = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(Ok(s)) => s.code().unwrap_or(-1),
+        _ => { let _ = child.kill().await; -1 }
+    };
 
-    // Clean up socket files
-    let _ = std::fs::remove_file(&api_sock);
-    let _ = std::fs::remove_file(&vsock_sock);
-
-    // --- 9. Sync volumes back to host ---
-    for mount in &vm_cfg.mounts {
-        let image = vm_cfg.volume_image_path(&mount.name);
-        info!("vm: syncing volume '{}' back to host", mount.name);
-        if let Err(e) =
-            volume::sync_back(&image, &PathBuf::from(&mount.host_path)).await
-        {
-            warn!("vm: sync-back '{}' failed: {e:#}", mount.name);
-        }
-    }
-
-    // --- 10. Report completion ---
     ws_send(
         ws_tx,
         &C2S::SessionEnded {
@@ -303,77 +241,109 @@ async fn do_run(
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Container lifecycle helpers
 // ---------------------------------------------------------------------------
 
-/// Connect to the Firecracker vsock host socket and perform the CONNECT
-/// handshake to reach the agent listening on `port` inside the VM.
-async fn connect_vsock(
-    uds_path: &str,
-    port: u32,
-    timeout: Duration,
-) -> Result<UnixStream> {
-    let deadline = tokio::time::Instant::now() + timeout;
+/// Returns the current state of a container ("running", "exited", etc.), or
+/// `None` if the container does not exist.
+async fn container_state(name: &str) -> Option<String> {
+    let out = Command::new("docker")
+        .args(["inspect", "--format", "{{.State.Status}}", name])
+        .output()
+        .await
+        .ok()?;
 
-    loop {
-        match tokio::net::UnixStream::connect(uds_path).await {
-            Ok(mut stream) => {
-                // Firecracker vsock CONNECT handshake
-                let handshake = format!("CONNECT {port}\n");
-                stream
-                    .write_all(handshake.as_bytes())
-                    .await
-                    .context("vsock handshake write")?;
-
-                let mut response = String::new();
-                let mut reader = BufReader::new(&mut stream);
-                tokio::time::timeout(
-                    Duration::from_secs(5),
-                    reader.read_line(&mut response),
-                )
-                .await
-                .context("vsock handshake timeout")?
-                .context("vsock handshake read")?;
-
-                if response.starts_with("OK ") {
-                    return Ok(stream);
-                }
-                anyhow::bail!("unexpected vsock response: {response}");
-            }
-            Err(_) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            Err(e) => {
-                anyhow::bail!("vsock connect to {uds_path}: {e}");
-            }
-        }
+    if out.status.success() {
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        None
     }
 }
 
-/// Construct the kernel boot args string, encoding the volume mount map.
-pub fn build_boot_args(mounts: &[config::VolumeMount]) -> String {
-    // Firecracker assigns drives in order: /dev/vda = rootfs, /dev/vdb, /dev/vdc, ...
-    let pairs: Vec<String> = mounts
-        .iter()
-        .enumerate()
-        .map(|(i, m)| {
-            let dev = format!("/dev/vd{}", (b'b' + i as u8) as char);
-            format!("{}:{}", dev, m.guest_path)
-        })
-        .collect();
+/// Ensures the named container exists and is in the `running` state.
+///
+/// * If it doesn't exist  → create it with `docker run -d sleep infinity`.
+/// * If it is stopped     → restart it with `docker start`.
+/// * If it is running     → no-op.
+async fn ensure_container(
+    name: &str,
+    config: &crate::session_runner::SessionConfig,
+    vm_cfg: &VmConfig,
+) -> Result<()> {
+    match container_state(name).await.as_deref() {
+        Some("running") => {
+            info!("docker: reusing running container {name}");
+            return Ok(());
+        }
+        Some(state @ ("exited" | "stopped" | "created" | "paused")) => {
+            info!("docker: restarting {state} container {name}");
+            let s = Command::new("docker")
+                .args(["start", name])
+                .status()
+                .await
+                .context("docker start")?;
+            anyhow::ensure!(s.success(), "docker start {name} failed");
+            return Ok(());
+        }
+        Some(other) => {
+            // Unexpected state (dead, removing, …) — remove and recreate.
+            warn!("docker: container {name} is in unexpected state '{other}', removing");
+            let _ = Command::new("docker").args(["rm", "-f", name]).status().await;
+        }
+        None => {
+            // Container does not exist.
+        }
+    }
 
-    let vm_mounts = if pairs.is_empty() {
-        String::new()
+    // Create the container. It runs `sleep infinity` so it stays alive between
+    // Claude exec invocations.
+    let mut cmd = Command::new("docker");
+    cmd.args(["run", "-d", "--name", name]);
+
+    // Networking
+    if vm_cfg.network_enabled {
+        cmd.args(["--network", "bridge"]);
     } else {
-        format!(" vm_mounts={}", pairs.join(","))
-    };
+        cmd.args(["--network", "none"]);
+    }
 
-    format!("console=ttyS0 reboot=k panic=1 pci=off nomodules{vm_mounts}")
+    // Bind-mount host directories.
+    for mount in &vm_cfg.mounts {
+        cmd.args(["-v", &format!("{}:{}", mount.host_path, mount.guest_path)]);
+    }
+
+    // Default working directory.
+    cmd.args(["-w", &config.default_cwd]);
+
+    // Pass the current API key into the container environment.
+    cmd.args(["--env", "ANTHROPIC_API_KEY"]);
+
+    // Labels for lifecycle management.
+    cmd.args([
+        "--label", "claude.managed=true",
+        "--label", &format!("claude.session_id={}", config.session_id),
+        "--label", &format!("claude.claude_session_id={}", config.claude_session_id),
+    ]);
+
+    // Image + sentinel command.
+    cmd.arg(&vm_cfg.image);
+    cmd.args(["sleep", "infinity"]);
+
+    let status = cmd
+        .status()
+        .await
+        .context("docker run (create container)")?;
+    anyhow::ensure!(status.success(), "docker run failed for container {name}");
+
+    info!("docker: created container {name}");
+    Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 fn format_user_message(text: &str) -> String {
-    let escaped = serde_json::to_string(text).unwrap_or_default();
-    format!(
-        "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":{escaped}}}}}\n"
-    )
+    let content_json = serde_json::to_string(text).unwrap_or_else(|_| format!("{text:?}"));
+    format!("{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":{content_json}}}}}\n")
 }

@@ -282,6 +282,17 @@ async fn handle_text(state: &Arc<AppState>, text: &str) {
             }
         }
 
+        C2S::BuildImageResult {
+            request_id,
+            success,
+            output,
+        } => {
+            let mut pending = state.vm_config_pending.write().await;
+            if let Some(tx) = pending.remove(&request_id) {
+                let _ = tx.send(crate::protocol::VmConfigResponse::BuildResult { success, output });
+            }
+        }
+
         // -------------------------------------------------------------------
         C2S::ImportHistory { sessions } => {
             let hostname = {

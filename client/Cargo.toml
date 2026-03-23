@@ -28,7 +28,6 @@ atty              = "0.2"
 base64            = "0.22"
 toml              = "0.8"
 which             = "6"
-firecracker       = "0.2"
 tempfile          = "3"
 # tray-icon is used on all platforms; disable the libxdo default feature so we
 # don't need the xdotool C library installed just to link.  The libxdo feature

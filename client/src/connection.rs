@@ -356,6 +356,65 @@ async fn handle_text_message(
             });
         }
 
+        S2C::BuildImage { request_id } => {
+            let ws_tx_clone = Arc::clone(ws_tx);
+            tokio::spawn(async move {
+                let cfg = match crate::vm::config::VmConfig::load() {
+                    Ok(Some(c)) => c,
+                    Ok(None) => crate::vm::config::VmConfig::detect_defaults(),
+                    Err(e) => {
+                        ws_send(
+                            &ws_tx_clone,
+                            &C2S::BuildImageResult {
+                                request_id,
+                                success: false,
+                                output: format!("failed to load vm config: {e}"),
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                let dockerfile = crate::vm::config::VmConfig::dockerfile_path();
+
+                // Write (or overwrite) the Dockerfile from the current config.
+                if let Err(e) = crate::vm::rootfs::write_dockerfile(
+                    &cfg.base_image,
+                    &cfg.tools.extra_packages,
+                    &dockerfile,
+                )
+                .await
+                {
+                    ws_send(
+                        &ws_tx_clone,
+                        &C2S::BuildImageResult {
+                            request_id,
+                            success: false,
+                            output: format!("failed to write Dockerfile: {e}"),
+                        },
+                    )
+                    .await;
+                    return;
+                }
+
+                let (success, output) = match crate::vm::rootfs::build(&cfg.image, &dockerfile).await {
+                    Ok(out) => (true, out),
+                    Err(e) => (false, e.to_string()),
+                };
+
+                ws_send(
+                    &ws_tx_clone,
+                    &C2S::BuildImageResult {
+                        request_id,
+                        success,
+                        output,
+                    },
+                )
+                .await;
+            });
+        }
+
         S2C::QueryCommands => {
             info!("QueryCommands: discovering slash commands");
             let claude_path = config.claude_path.clone();

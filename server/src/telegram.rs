@@ -72,7 +72,7 @@ enum Cmd {
     // ── VM management ──
     #[command(description = "Save auto-detected VM config to disk")]
     Vminit,
-    #[command(description = "Set a VM field: /vmset firecracker|kernel|rootfs|datadir|vcpus|memory|network <value>")]
+    #[command(description = "Set a VM field: /vmset image|base|datadir|network <value>")]
     Vmset(String),
     #[command(description = "Show VM config")]
     Vmconfig,
@@ -86,7 +86,7 @@ enum Cmd {
     Vmenable,
     #[command(description = "Disable VM mode")]
     Vmdisable,
-    #[command(description = "Rebuild VM rootfs on the client machine")]
+    #[command(description = "Build (or rebuild) the Docker image on the client machine")]
     Vmrebuild,
 }
 
@@ -335,7 +335,7 @@ async fn handle_command(
                 bot.send_message(
                     chat_id,
                     "Usage: /vmset <field> <value>\n\
-                     Fields: firecracker, kernel, rootfs, datadir, vcpus, memory",
+                     Fields: image, base, datadir, network",
                 )
                 .await?;
                 return Ok(());
@@ -361,21 +361,15 @@ async fn handle_command(
                             .await?;
                     }
                 },
-                "firecracker" => {
+                "image" => {
                     vm_update_config(&bot, chat_id, &app_state, move |c| {
-                        c.firecracker_path = value;
+                        c.image = value;
                     })
                     .await?;
                 }
-                "kernel" => {
+                "base" => {
                     vm_update_config(&bot, chat_id, &app_state, move |c| {
-                        c.kernel_path = value;
-                    })
-                    .await?;
-                }
-                "rootfs" => {
-                    vm_update_config(&bot, chat_id, &app_state, move |c| {
-                        c.rootfs_path = value;
+                        c.base_image = value;
                     })
                     .await?;
                 }
@@ -385,33 +379,10 @@ async fn handle_command(
                     })
                     .await?;
                 }
-                "vcpus" => match value.parse::<u32>() {
-                    Ok(n) => {
-                        vm_update_config(&bot, chat_id, &app_state, move |c| {
-                            c.vcpus = n;
-                        })
-                        .await?;
-                    }
-                    Err(_) => {
-                        bot.send_message(chat_id, "❌ vcpus must be a positive integer")
-                            .await?;
-                    }
-                },
-                "memory" => match value.parse::<u32>() {
-                    Ok(n) => {
-                        vm_update_config(&bot, chat_id, &app_state, move |c| {
-                            c.memory_mb = n;
-                        })
-                        .await?;
-                    }
-                    Err(_) => {
-                        bot.send_message(chat_id, "❌ memory must be a number (MB)").await?;
-                    }
-                },
                 _ => {
                     bot.send_message(
                         chat_id,
-                        "❌ Unknown field. Valid fields: firecracker, kernel, rootfs, datadir, vcpus, memory, network",
+                        "❌ Unknown field. Valid fields: image, base, datadir, network",
                     )
                     .await?;
                 }
@@ -530,34 +501,43 @@ async fn handle_command(
         }
 
         Cmd::Vmrebuild => {
-            bot.send_message(chat_id, "🔨 Requesting rootfs rebuild on client…")
+            bot.send_message(chat_id, "🔨 Building Docker image on client… (this may take a while)")
                 .await?;
-            // Rebuild is triggered by sending an updated config that the client
-            // detects has changed. For now, just send the current config back,
-            // which makes the client re-save it (a future hook can detect the
-            // rootfs is stale). A dedicated S2C::RebuildRootfs message could be
-            // added later.
-            match vm_get_config(&app_state).await {
-                Ok(cfg) => {
-                    let request_id = Uuid::new_v4().to_string();
-                    match vm_send_and_await(&app_state, crate::protocol::S2C::SetVmConfig {
-                        request_id,
-                        config: cfg,
-                    })
-                    .await
-                    {
-                        Ok(_) => {
-                            bot.send_message(
-                                chat_id,
-                                "✅ Config saved. Run <code>claude-client --rebuild-rootfs</code> on the client to rebuild.",
-                            )
-                            .parse_mode(ParseMode::Html)
-                            .await?;
-                        }
-                        Err(e) => {
-                            bot.send_message(chat_id, format!("❌ {e}")).await?;
-                        }
-                    }
+            let request_id = Uuid::new_v4().to_string();
+            match vm_send_and_await(
+                &app_state,
+                crate::protocol::S2C::BuildImage { request_id },
+            )
+            .await
+            {
+                Ok(VmConfigResponse::BuildResult { success: true, output }) => {
+                    let tail = if output.len() > 3000 {
+                        format!("…{}", &output[output.len() - 3000..])
+                    } else {
+                        output
+                    };
+                    bot.send_message(
+                        chat_id,
+                        format!("✅ Image built.\n<pre>{}</pre>", escape_html(&tail)),
+                    )
+                    .parse_mode(ParseMode::Html)
+                    .await?;
+                }
+                Ok(VmConfigResponse::BuildResult { success: false, output }) => {
+                    let tail = if output.len() > 3000 {
+                        format!("…{}", &output[output.len() - 3000..])
+                    } else {
+                        output
+                    };
+                    bot.send_message(
+                        chat_id,
+                        format!("❌ Build failed.\n<pre>{}</pre>", escape_html(&tail)),
+                    )
+                    .parse_mode(ParseMode::Html)
+                    .await?;
+                }
+                Ok(_) => {
+                    bot.send_message(chat_id, "❌ Unexpected response from client.").await?;
                 }
                 Err(e) => {
                     bot.send_message(chat_id, format!("❌ {e}")).await?;
@@ -810,6 +790,7 @@ async fn vm_send_and_await(
     let request_id = match &msg {
         S2C::GetVmConfig { request_id } => request_id.clone(),
         S2C::SetVmConfig { request_id, .. } => request_id.clone(),
+        S2C::BuildImage { request_id } => request_id.clone(),
         _ => anyhow::bail!("vm_send_and_await: unexpected message type"),
     };
 
@@ -836,9 +817,7 @@ async fn vm_get_config(app_state: &Arc<AppState>) -> anyhow::Result<VmConfigProt
     match vm_send_and_await(app_state, S2C::GetVmConfig { request_id }).await? {
         VmConfigResponse::Config(cfg) => Ok(cfg),
         VmConfigResponse::Ack { error: Some(e), .. } => anyhow::bail!("{e}"),
-        VmConfigResponse::Ack { .. } => {
-            anyhow::bail!("unexpected Ack response to GetVmConfig")
-        }
+        _ => anyhow::bail!("unexpected response to GetVmConfig"),
     }
 }
 
@@ -904,9 +883,8 @@ fn format_vm_config(cfg: &VmConfigProto) -> String {
     let mut lines = vec![
         format!("🖥 <b>VM Config</b> — {status}"),
         format!("  Network: {net_status}"),
-        format!("  vCPUs: <code>{}</code>  RAM: <code>{}MB</code>", cfg.vcpus, cfg.memory_mb),
-        format!("  Kernel: <code>{}</code>", escape_html(&cfg.kernel_path)),
-        format!("  Rootfs: <code>{}</code>", escape_html(&cfg.rootfs_path)),
+        format!("  Base image: <code>{}</code>", escape_html(&cfg.base_image)),
+        format!("  Built image: <code>{}</code>", escape_html(&cfg.image)),
     ];
 
     if cfg.mounts.is_empty() {
