@@ -282,14 +282,26 @@ async fn handle_text(state: &Arc<AppState>, text: &str) {
             }
         }
 
+        C2S::BuildImageLog { request_id, line } => {
+            let pending = state.vm_build_log_pending.read().await;
+            if let Some(tx) = pending.get(&request_id) {
+                let _ = tx.send(line);
+            }
+        }
+
         C2S::BuildImageResult {
             request_id,
             success,
-            output,
+            error,
         } => {
+            // Close the log stream first so the editing task drains and stops.
+            {
+                let mut pending = state.vm_build_log_pending.write().await;
+                pending.remove(&request_id);
+            }
             let mut pending = state.vm_config_pending.write().await;
             if let Some(tx) = pending.remove(&request_id) {
-                let _ = tx.send(crate::protocol::VmConfigResponse::BuildResult { success, output });
+                let _ = tx.send(crate::protocol::VmConfigResponse::BuildResult { success, error });
             }
         }
 

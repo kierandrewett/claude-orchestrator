@@ -368,7 +368,7 @@ async fn handle_text_message(
                             &C2S::BuildImageResult {
                                 request_id,
                                 success: false,
-                                output: format!("failed to load vm config: {e}"),
+                                error: Some(format!("failed to load vm config: {e}")),
                             },
                         )
                         .await;
@@ -391,24 +391,43 @@ async fn handle_text_message(
                         &C2S::BuildImageResult {
                             request_id,
                             success: false,
-                            output: format!("failed to write Dockerfile: {e}"),
+                            error: Some(format!("failed to write Dockerfile: {e}")),
                         },
                     )
                     .await;
                     return;
                 }
 
-                let (success, output) = match crate::vm::rootfs::build(&cfg.image, &dockerfile).await {
-                    Ok(out) => (true, out),
-                    Err(e) => (false, e.to_string()),
-                };
+                // Stream log lines back to the server as they arrive.
+                let (log_tx, mut log_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<String>();
+                let ws_for_logs = Arc::clone(&ws_tx_clone);
+                let req_id_for_logs = request_id.clone();
+                tokio::spawn(async move {
+                    while let Some(line) = log_rx.recv().await {
+                        ws_send(
+                            &ws_for_logs,
+                            &C2S::BuildImageLog {
+                                request_id: req_id_for_logs.clone(),
+                                line,
+                            },
+                        )
+                        .await;
+                    }
+                });
+
+                let (success, error) =
+                    match crate::vm::rootfs::build(&cfg.image, &dockerfile, log_tx).await {
+                        Ok(()) => (true, None),
+                        Err(e) => (false, Some(e.to_string())),
+                    };
 
                 ws_send(
                     &ws_tx_clone,
                     &C2S::BuildImageResult {
                         request_id,
                         success,
-                        output,
+                        error,
                     },
                 )
                 .await;

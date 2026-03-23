@@ -70,54 +70,68 @@ pub async fn write_dockerfile(
 
 /// Build the Docker image from `dockerfile_path`, tagging it as `image`.
 ///
-/// Captures combined stdout+stderr and returns the last 4 KB of output so the
-/// caller can report progress.
-pub async fn build(image: &str, dockerfile_path: &Path) -> Result<String> {
+/// Each line of docker build output (stdout + stderr) is forwarded to
+/// `log_tx` as it arrives so callers can stream progress to the user.
+pub async fn build(
+    image: &str,
+    dockerfile_path: &Path,
+    log_tx: tokio::sync::mpsc::UnboundedSender<String>,
+) -> Result<()> {
     anyhow::ensure!(
         dockerfile_path.exists(),
-        "Dockerfile not found at {} — run /vminit first",
+        "Dockerfile not found at {} — run /vmrebuild first",
         dockerfile_path.display()
     );
 
     info!("rootfs: building Docker image {image} from {}", dockerfile_path.display());
 
-    let output = Command::new("docker")
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let mut child = Command::new("docker")
         .args([
             "build",
+            "--progress=plain",
             "--no-cache",
             "-t",
             image,
             "-f",
             dockerfile_path.to_str().unwrap(),
-            // Use the Dockerfile's directory as build context (usually has no
-            // extra files, so the context is tiny).
             dockerfile_path
                 .parent()
                 .unwrap_or(Path::new("."))
                 .to_str()
                 .unwrap(),
         ])
-        .output()
-        .await
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
         .context("docker build")?;
 
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    // Return last 4 KB for display.
-    let tail = if combined.len() > 4096 {
-        combined[combined.len() - 4096..].to_string()
-    } else {
-        combined.clone()
-    };
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
 
-    if output.status.success() {
+    // Forward stdout lines.
+    let log_tx2 = log_tx.clone();
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let _ = log_tx2.send(line);
+        }
+    });
+
+    // Forward stderr lines in this task.
+    let mut lines = BufReader::new(stderr).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let _ = log_tx.send(line);
+    }
+
+    let status = child.wait().await.context("docker build wait")?;
+    if status.success() {
         info!("rootfs: image {image} built successfully");
-        Ok(tail)
+        Ok(())
     } else {
-        anyhow::bail!("docker build failed:\n{tail}")
+        anyhow::bail!("docker build failed (exit {})", status.code().unwrap_or(-1))
     }
 }
 

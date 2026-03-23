@@ -501,46 +501,95 @@ async fn handle_command(
         }
 
         Cmd::Vmrebuild => {
-            bot.send_message(chat_id, "🔨 Building Docker image on client… (this may take a while)")
+            let build_msg = bot
+                .send_message(chat_id, "🔨 Building Docker image on client…")
                 .await?;
+            let msg_id = build_msg.id;
+
             let request_id = Uuid::new_v4().to_string();
-            match vm_send_and_await(
+
+            // Register a log channel before sending the request so no lines
+            // are dropped between the client starting and us listening.
+            let (log_tx, mut log_rx) =
+                tokio::sync::mpsc::unbounded_channel::<String>();
+            {
+                let mut pending = app_state.vm_build_log_pending.write().await;
+                pending.insert(request_id.clone(), log_tx);
+            }
+
+            // Spawn a task that edits the message with rolling log output
+            // every 3 seconds.
+            let bot_log = bot.clone();
+            let log_task = tokio::spawn(async move {
+                let mut lines: Vec<String> = Vec::new();
+                let mut interval =
+                    tokio::time::interval(std::time::Duration::from_secs(3));
+                interval.set_missed_tick_behavior(
+                    tokio::time::MissedTickBehavior::Skip,
+                );
+                loop {
+                    tokio::select! {
+                        line = log_rx.recv() => {
+                            match line {
+                                Some(l) => lines.push(l),
+                                None => break,
+                            }
+                        }
+                        _ = interval.tick() => {
+                            if lines.is_empty() { continue; }
+                            let tail = lines
+                                .iter()
+                                .rev()
+                                .take(25)
+                                .rev()
+                                .map(|s| s.as_str())
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            let preview = escape_html(&tail);
+                            // Keep well within Telegram's 4096 char limit.
+                            let text = if preview.len() > 3800 {
+                                format!("🔨 Building…\n<pre>…{}</pre>", &preview[preview.len() - 3800..])
+                            } else {
+                                format!("🔨 Building…\n<pre>{preview}</pre>")
+                            };
+                            let _ = bot_log
+                                .edit_message_text(chat_id, msg_id, text)
+                                .parse_mode(ParseMode::Html)
+                                .await;
+                        }
+                    }
+                }
+            });
+
+            let result = vm_send_and_await(
                 &app_state,
                 crate::protocol::S2C::BuildImage { request_id },
             )
-            .await
-            {
-                Ok(VmConfigResponse::BuildResult { success: true, output }) => {
-                    let tail = if output.len() > 3000 {
-                        format!("…{}", &output[output.len() - 3000..])
-                    } else {
-                        output
-                    };
-                    bot.send_message(
-                        chat_id,
-                        format!("✅ Image built.\n<pre>{}</pre>", escape_html(&tail)),
-                    )
-                    .parse_mode(ParseMode::Html)
-                    .await?;
+            .await;
+
+            log_task.abort();
+
+            match result {
+                Ok(VmConfigResponse::BuildResult { success: true, .. }) => {
+                    bot.edit_message_text(chat_id, msg_id, "✅ Docker image built successfully.")
+                        .await?;
                 }
-                Ok(VmConfigResponse::BuildResult { success: false, output }) => {
-                    let tail = if output.len() > 3000 {
-                        format!("…{}", &output[output.len() - 3000..])
-                    } else {
-                        output
-                    };
-                    bot.send_message(
+                Ok(VmConfigResponse::BuildResult { success: false, error }) => {
+                    let msg = error.unwrap_or_else(|| "unknown error".to_string());
+                    bot.edit_message_text(
                         chat_id,
-                        format!("❌ Build failed.\n<pre>{}</pre>", escape_html(&tail)),
+                        msg_id,
+                        format!("❌ Build failed: {msg}"),
                     )
-                    .parse_mode(ParseMode::Html)
                     .await?;
                 }
                 Ok(_) => {
-                    bot.send_message(chat_id, "❌ Unexpected response from client.").await?;
+                    bot.edit_message_text(chat_id, msg_id, "❌ Unexpected response from client.")
+                        .await?;
                 }
                 Err(e) => {
-                    bot.send_message(chat_id, format!("❌ {e}")).await?;
+                    bot.edit_message_text(chat_id, msg_id, format!("❌ {e}"))
+                        .await?;
                 }
             }
         }
@@ -776,8 +825,10 @@ async fn kill_current_session(
 // VM config helpers
 // ---------------------------------------------------------------------------
 
-/// Timeout for waiting for a VM config request/response round-trip.
+/// Timeout for get/set VM config round-trips.
 const VM_CONFIG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Timeout for docker build — can take several minutes on first run.
+const VM_BUILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Sends `msg` to the client and awaits the corresponding response via the
 /// `vm_config_pending` oneshot map.  Returns an error string if the client is
@@ -786,11 +837,11 @@ async fn vm_send_and_await(
     app_state: &Arc<AppState>,
     msg: S2C,
 ) -> anyhow::Result<VmConfigResponse> {
-    // Extract request_id from the message so we can register the waiter.
-    let request_id = match &msg {
-        S2C::GetVmConfig { request_id } => request_id.clone(),
-        S2C::SetVmConfig { request_id, .. } => request_id.clone(),
-        S2C::BuildImage { request_id } => request_id.clone(),
+    // Extract request_id and pick the appropriate timeout.
+    let (request_id, timeout) = match &msg {
+        S2C::GetVmConfig { request_id } => (request_id.clone(), VM_CONFIG_TIMEOUT),
+        S2C::SetVmConfig { request_id, .. } => (request_id.clone(), VM_CONFIG_TIMEOUT),
+        S2C::BuildImage { request_id } => (request_id.clone(), VM_BUILD_TIMEOUT),
         _ => anyhow::bail!("vm_send_and_await: unexpected message type"),
     };
 
@@ -804,7 +855,7 @@ async fn vm_send_and_await(
         anyhow::bail!("client not connected");
     }
 
-    match tokio::time::timeout(VM_CONFIG_TIMEOUT, rx).await {
+    match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(response)) => Ok(response),
         Ok(Err(_)) => anyhow::bail!("client dropped the response channel"),
         Err(_) => anyhow::bail!("timed out waiting for VM config response"),

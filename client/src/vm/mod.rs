@@ -295,6 +295,21 @@ async fn ensure_container(
         }
     }
 
+    // Check the image exists locally before trying to create the container.
+    let image_check = Command::new("docker")
+        .args(["image", "inspect", "--format", "{{.Id}}", &vm_cfg.image])
+        .output()
+        .await
+        .ok();
+    let image_exists = image_check.map(|o| o.status.success()).unwrap_or(false);
+    if !image_exists {
+        anyhow::bail!(
+            "Docker image '{}' not found locally. \
+             Run /vmrebuild from Telegram (or `docker build`) to build it first.",
+            vm_cfg.image
+        );
+    }
+
     // Create the container. It runs `sleep infinity` so it stays alive between
     // Claude exec invocations.
     let mut cmd = Command::new("docker");

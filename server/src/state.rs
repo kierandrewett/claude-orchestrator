@@ -50,6 +50,9 @@ pub struct AppState {
     /// Key = request_id, value = oneshot sender to wake the waiting handler.
     pub vm_config_pending:
         RwLock<HashMap<String, tokio::sync::oneshot::Sender<VmConfigResponse>>>,
+    /// Streaming log lines from an in-progress BuildImage.
+    pub vm_build_log_pending:
+        RwLock<HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>,
 }
 
 impl AppState {
@@ -86,6 +89,7 @@ impl AppState {
             store,
             pending_resumes: RwLock::new(Vec::new()),
             vm_config_pending: RwLock::new(HashMap::new()),
+            vm_build_log_pending: RwLock::new(HashMap::new()),
         })
     }
 

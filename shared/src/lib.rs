@@ -100,12 +100,16 @@ pub enum C2S {
         success: bool,
         error: Option<String>,
     },
-    /// Result of a BuildImage request.
+    /// Streaming log line from an in-progress BuildImage.
+    BuildImageLog {
+        request_id: String,
+        line: String,
+    },
+    /// Final result of a BuildImage request.
     BuildImageResult {
         request_id: String,
         success: bool,
-        /// Last portion of docker build output (stdout+stderr), trimmed.
-        output: String,
+        error: Option<String>,
     },
 }
 
@@ -177,7 +181,7 @@ impl Default for VmConfigProto {
 pub enum VmConfigResponse {
     Config(VmConfigProto),
     Ack { success: bool, error: Option<String> },
-    BuildResult { success: bool, output: String },
+    BuildResult { success: bool, error: Option<String> },
 }
 
 /// A file attached to a message, transferred from the Telegram bot to the client
