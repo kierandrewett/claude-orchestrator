@@ -1,6 +1,6 @@
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import type { SessionStatus } from '../types';
+import type { TaskState } from '../types';
 
 export function cn(...inputs: ClassValue[]) {
     return twMerge(clsx(inputs));
@@ -33,53 +33,29 @@ export function formatTokens(n: number): string {
     return `${(n / 1_000_000).toFixed(2)}M`;
 }
 
-export function getStatusColor(status: SessionStatus | string): string {
-    switch (status) {
-        case 'running':
-            return 'text-emerald-400';
-        case 'pending':
-            return 'text-amber-400';
-        case 'completed':
-            return 'text-zinc-400';
-        case 'failed':
-            return 'text-red-400';
-        case 'killed':
-            return 'text-orange-400';
-        default:
-            return 'text-zinc-500';
+export function getStatusColor(state: TaskState | string): string {
+    switch (state) {
+        case 'Running': return 'text-emerald-400';
+        case 'Hibernated': return 'text-amber-400';
+        case 'Dead': return 'text-zinc-400';
+        default: return 'text-zinc-500';
     }
 }
 
-export function getStatusBgColor(status: SessionStatus | string): string {
-    switch (status) {
-        case 'running':
-            return 'bg-emerald-400/10 text-emerald-400 ring-emerald-400/20';
-        case 'pending':
-            return 'bg-amber-400/10 text-amber-400 ring-amber-400/20';
-        case 'completed':
-            return 'bg-zinc-400/10 text-zinc-400 ring-zinc-400/20';
-        case 'failed':
-            return 'bg-red-400/10 text-red-400 ring-red-400/20';
-        case 'killed':
-            return 'bg-orange-400/10 text-orange-400 ring-orange-400/20';
-        default:
-            return 'bg-zinc-500/10 text-zinc-500 ring-zinc-500/20';
+export function getStatusBgColor(state: TaskState | string): string {
+    switch (state) {
+        case 'Running': return 'bg-emerald-400/10 text-emerald-400 ring-emerald-400/20';
+        case 'Hibernated': return 'bg-amber-400/10 text-amber-400 ring-amber-400/20';
+        case 'Dead': return 'bg-zinc-400/10 text-zinc-400 ring-zinc-400/20';
+        default: return 'bg-zinc-500/10 text-zinc-500 ring-zinc-500/20';
     }
 }
 
-export function getStatusDot(status: SessionStatus | string): string {
-    switch (status) {
-        case 'running':
-            return 'bg-emerald-400';
-        case 'pending':
-            return 'bg-amber-400';
-        case 'completed':
-            return 'bg-zinc-400';
-        case 'failed':
-            return 'bg-red-400';
-        case 'killed':
-            return 'bg-orange-400';
-        default:
-            return 'bg-zinc-500';
+export function getStatusDot(state: TaskState | string): string {
+    switch (state) {
+        case 'Running': return 'bg-emerald-400';
+        case 'Hibernated': return 'bg-amber-400';
+        case 'Dead': return 'bg-zinc-400';
+        default: return 'bg-zinc-500';
     }
 }

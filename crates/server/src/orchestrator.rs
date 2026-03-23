@@ -116,7 +116,20 @@ impl Orchestrator {
                 self.handle_user_message(&task_id, text, Some(message_ref))
                     .await;
             }
+            BackendEvent::InterruptTask { task_id, .. } => {
+                self.interrupt_task(&task_id).await;
+            }
         }
+    }
+
+    async fn interrupt_task(&self, task_id: &TaskId) {
+        info!("orchestrator: interrupting task {task_id}");
+        // TODO: route S2C::InterruptSession to the client holding this task
+        // once client session routing is wired up.
+        self.bus.emit(OrchestratorEvent::CommandResponse {
+            task_id: Some(task_id.clone()),
+            text: "⏹ Interrupting…".to_string(),
+        });
     }
 
     async fn handle_user_message(
@@ -213,6 +226,39 @@ impl Orchestrator {
             }
             ParsedCommand::New { profile, prompt } => {
                 self.create_task(profile, prompt, TaskKind::Job).await;
+            }
+            ParsedCommand::SlashCommands => {
+                let containers = Arc::clone(&self.containers);
+                let bus = self.bus.clone();
+                tokio::spawn(async move {
+                    let image = "orchestrator/claude-code:base";
+                    match containers.discover_slash_commands(image).await {
+                        Ok(cmds) => {
+                            let text = if cmds.is_empty() {
+                                "No slash commands found.".to_string()
+                            } else {
+                                cmds.iter()
+                                    .map(|c| {
+                                        if c.description.is_empty() {
+                                            c.name.clone()
+                                        } else {
+                                            format!("{} — {}", c.name, c.description)
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            };
+                            bus.emit(OrchestratorEvent::CommandResponse { task_id, text });
+                        }
+                        Err(e) => {
+                            bus.emit(OrchestratorEvent::Error {
+                                task_id,
+                                error: format!("slash command discovery failed: {e}"),
+                                next_steps: vec![],
+                            });
+                        }
+                    }
+                });
             }
         }
     }

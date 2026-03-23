@@ -13,6 +13,7 @@ members = [
     "crates/backend-discord",
     "crates/backend-web",
     "crates/backend-stdio",
+    "crates/claude-generate-config",
 ]
 
 [workspace.dependencies]

@@ -28,6 +28,13 @@ pub enum BackendEvent {
         source: BackendSource,
     },
 
+    /// Interrupt the current Claude response for a task (SIGINT — session
+    /// stays alive, Claude returns to the input prompt).
+    InterruptTask {
+        task_id: TaskId,
+        source: BackendSource,
+    },
+
     /// A file upload from a user (image, PDF, attachment, …).
     FileUpload {
         task_id: TaskId,

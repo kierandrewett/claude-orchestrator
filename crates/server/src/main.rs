@@ -58,19 +58,31 @@ async fn main() -> Result<()> {
 }
 
 async fn run(config_path: PathBuf) -> Result<()> {
-    let config = if config_path.exists() {
-        OrchestratorConfig::load(&config_path)?
-    } else {
-        warn!("no config file at {}, using defaults", config_path.display());
-        OrchestratorConfig::default()
-    };
+    if !config_path.exists() {
+        anyhow::bail!(
+            "config file not found at {}\n\
+             Create one or pass a path with --config.",
+            config_path.display()
+        );
+    }
+    let config = OrchestratorConfig::load(&config_path)?;
 
     let state_dir = OrchestratorConfig::expand_path(&config.server.state_dir);
     let auth_dir = OrchestratorConfig::expand_path(&config.auth.credentials_dir);
 
-    let auth = AuthManager::new(auth_dir);
+    let auth = AuthManager::new(auth_dir.clone());
     if !auth.has_credentials() {
-        warn!("no credentials found — run `claude-orchestrator setup` to authenticate");
+        info!("no credentials found — running setup automatically");
+        let containers = ContainerManager::new(
+            &config.docker.socket,
+            AuthManager::new(auth_dir),
+            PathBuf::from("docker/profiles"),
+        )
+        .context("connecting to Docker for setup")?;
+        auth.login(&containers.docker, "orchestrator/claude-code:base")
+            .await
+            .context("automatic setup: authentication flow")?;
+        info!("setup complete");
     }
 
     let containers = ContainerManager::new(
@@ -158,11 +170,12 @@ async fn run(config_path: PathBuf) -> Result<()> {
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             info!("shutdown signal received");
-            // Hibernate all running tasks.
             let ids = orch_clone.registry.all_ids();
             for id in ids {
                 orch_clone.hibernate_task(&id).await;
             }
+            info!("shutdown complete");
+            std::process::exit(0);
         }
     });
 

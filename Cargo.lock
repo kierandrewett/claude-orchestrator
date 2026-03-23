@@ -564,6 +564,7 @@ name = "claude-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "atty",
  "base64 0.22.1",
  "chrono",
@@ -625,6 +626,15 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "claude-generate-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs 5.0.1",
+ "serde_json",
 ]
 
 [[package]]

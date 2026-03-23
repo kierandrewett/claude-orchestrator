@@ -25,6 +25,9 @@ pub enum ParsedCommand {
 
     /// `/config <key> <value>` — update a task config option.
     Config { key: String, value: String },
+
+    /// `/slash-commands` — list Claude slash commands (discovered inside a container).
+    SlashCommands,
 }
 
 /// Parse a text string beginning with `/` into a `ParsedCommand`.
@@ -88,6 +91,8 @@ pub fn parse(text: &str) -> Result<ParsedCommand> {
                 .to_string();
             Ok(ParsedCommand::Config { key, value })
         }
+
+        "/slash-commands" => Ok(ParsedCommand::SlashCommands),
 
         other => bail!("unknown command '{}'", other),
     }

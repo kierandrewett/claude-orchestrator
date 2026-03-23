@@ -1,128 +1,115 @@
 import { useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import type { S2DMessage, SessionInfo, ClaudeEvent } from '../types';
+import type { OrchestratorEvent, TaskInfo } from '../types';
 
 export function useSSE() {
     const queryClient = useQueryClient();
 
     useEffect(() => {
-        let es: EventSource | null = null;
+        let ws: WebSocket | null = null;
         let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
         let backoff = 1000;
 
         function connect() {
-            es = new EventSource('/api/events');
+            const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+            ws = new WebSocket(url);
 
-            es.onopen = () => {
-                console.log('[SSE] Connected');
+            ws.onopen = () => {
                 backoff = 1000;
+                queryClient.setQueryData(['ws_connected'], true);
             };
 
-            es.onmessage = (event: MessageEvent<string>) => {
-                let msg: S2DMessage;
-                try {
-                    msg = JSON.parse(event.data) as S2DMessage;
-                } catch (e) {
-                    console.error('[SSE] Parse error:', e);
-                    return;
-                }
-                handleMessage(msg);
-            };
-
-            es.onerror = () => {
-                console.warn('[SSE] Error — reconnecting in', backoff, 'ms');
-                es?.close();
-                es = null;
+            ws.onclose = () => {
+                queryClient.setQueryData(['ws_connected'], false);
                 reconnectTimer = setTimeout(() => {
                     reconnectTimer = undefined;
                     connect();
                 }, backoff);
                 backoff = Math.min(backoff * 2, 30_000);
             };
+
+            ws.onerror = () => ws?.close();
+
+            ws.onmessage = (e: MessageEvent<string>) => {
+                let event: OrchestratorEvent;
+                try {
+                    event = JSON.parse(e.data) as OrchestratorEvent;
+                } catch (err) {
+                    console.error('[WS] Parse error:', err);
+                    return;
+                }
+                handleEvent(event);
+            };
         }
 
-        function handleMessage(msg: S2DMessage) {
-            switch (msg.type) {
-                case 'session_list':
-                    queryClient.setQueryData<{ sessions: SessionInfo[] }>(['sessions'], {
-                        sessions: msg.sessions,
-                    });
-                    break;
+        function appendHistory(taskId: string, event: OrchestratorEvent) {
+            queryClient.setQueryData<OrchestratorEvent[]>(['history', taskId], (old) => [
+                ...(old ?? []),
+                event,
+            ]);
+        }
 
-                case 'session_created':
-                    queryClient.setQueryData<{ sessions: SessionInfo[] }>(['sessions'], (old) => ({
-                        sessions: [
-                            msg.session,
-                            ...(old?.sessions ?? []).filter((s) => s.id !== msg.session.id),
-                        ],
-                    }));
-                    break;
+        function handleEvent(event: OrchestratorEvent) {
+            if ('TaskCreated' in event) {
+                const { task_id, name, profile } = event.TaskCreated;
+                const task: TaskInfo = {
+                    id: task_id,
+                    name,
+                    profile,
+                    state: 'Running',
+                    created_at: new Date().toISOString(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cost_usd: 0,
+                    turns: 0,
+                };
+                queryClient.setQueryData<{ tasks: TaskInfo[] }>(['tasks'], (old) => ({
+                    tasks: [task, ...(old?.tasks ?? []).filter((t) => t.id !== task_id)],
+                }));
+                return;
+            }
 
-                case 'session_updated':
-                    queryClient.setQueryData<{ sessions: SessionInfo[] }>(['sessions'], (old) => ({
-                        sessions: (old?.sessions ?? []).map((s) =>
-                            s.id === msg.session.id ? msg.session : s,
-                        ),
-                    }));
-                    break;
+            if ('TaskStateChanged' in event) {
+                const { task_id, new_state } = event.TaskStateChanged;
+                queryClient.setQueryData<{ tasks: TaskInfo[] }>(['tasks'], (old) => ({
+                    tasks: (old?.tasks ?? []).map((t) =>
+                        t.id === task_id ? { ...t, state: new_state } : t,
+                    ),
+                }));
+                return;
+            }
 
-                case 'session_event':
-                    queryClient.setQueryData<{ session_id: string; events: ClaudeEvent[] }>(
-                        ['history', msg.session_id],
-                        (old) => ({
-                            session_id: msg.session_id,
-                            events: old ? [...old.events, msg.event] : [msg.event],
-                        }),
-                    );
-                    break;
+            if ('TurnComplete' in event) {
+                const { task_id, usage } = event.TurnComplete;
+                queryClient.setQueryData<{ tasks: TaskInfo[] }>(['tasks'], (old) => ({
+                    tasks: (old?.tasks ?? []).map((t) =>
+                        t.id === task_id
+                            ? {
+                                  ...t,
+                                  input_tokens: t.input_tokens + usage.input_tokens,
+                                  output_tokens: t.output_tokens + usage.output_tokens,
+                                  cost_usd: t.cost_usd + usage.total_cost_usd,
+                                  turns: t.turns + usage.turns,
+                              }
+                            : t,
+                    ),
+                }));
+                appendHistory(task_id, event);
+                return;
+            }
 
-                case 'session_history':
-                    queryClient.setQueryData(['history', msg.session_id], {
-                        session_id: msg.session_id,
-                        events: msg.events,
-                    });
-                    break;
-
-                case 'session_ended':
-                    queryClient.setQueryData<{ sessions: SessionInfo[] }>(['sessions'], (old) => ({
-                        sessions: (old?.sessions ?? []).map((s) =>
-                            s.id === msg.session_id ? { ...s, stats: msg.stats } : s,
-                        ),
-                    }));
-                    break;
-
-                case 'client_status':
-                    queryClient.setQueryData(
-                        ['status'],
-                        (
-                            old:
-                                | {
-                                      connected: boolean;
-                                      hostname: string | null;
-                                      commands: unknown[];
-                                  }
-                                | undefined,
-                        ) => ({
-                            ...(old ?? { commands: [] }),
-                            connected: msg.connected,
-                            hostname: msg.hostname,
-                        }),
-                    );
-                    break;
-
-                case 'command_list':
-                    queryClient.setQueryData(
-                        ['status'],
-                        (old: { connected: boolean; hostname: string | null } | undefined) => ({
-                            ...(old ?? { connected: false, hostname: null }),
-                            commands: msg.commands,
-                        }),
-                    );
-                    break;
-
-                case 'error':
-                    console.error('[SSE] Server error:', msg.message);
-                    break;
+            // Route display events to per-task history
+            if ('TextOutput' in event) { appendHistory(event.TextOutput.task_id, event); return; }
+            if ('ToolStarted' in event) { appendHistory(event.ToolStarted.task_id, event); return; }
+            if ('ToolCompleted' in event) { appendHistory(event.ToolCompleted.task_id, event); return; }
+            if ('Thinking' in event) { appendHistory(event.Thinking.task_id, event); return; }
+            if ('FileOutput' in event) { appendHistory(event.FileOutput.task_id, event); return; }
+            if ('CommandResponse' in event && event.CommandResponse.task_id) {
+                appendHistory(event.CommandResponse.task_id, event);
+                return;
+            }
+            if ('Error' in event && event.Error.task_id) {
+                appendHistory(event.Error.task_id, event);
             }
         }
 
@@ -130,7 +117,7 @@ export function useSSE() {
 
         return () => {
             if (reconnectTimer !== undefined) clearTimeout(reconnectTimer);
-            es?.close();
+            ws?.close();
         };
     }, [queryClient]);
 }

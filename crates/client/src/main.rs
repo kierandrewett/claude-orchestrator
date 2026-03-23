@@ -1,9 +1,9 @@
 mod connection;
 mod history_importer;
 mod protocol;
+mod runner;
 mod session_runner;
 mod tray;
-mod vm;
 
 use std::sync::{Arc, Mutex};
 use tracing::info;
@@ -27,7 +27,6 @@ fn main() -> anyhow::Result<()> {
         .expect("SERVER_URL environment variable is required (ws:// or wss:// URL)");
     let client_token =
         std::env::var("CLIENT_TOKEN").expect("CLIENT_TOKEN environment variable is required");
-    let claude_path = std::env::var("CLAUDE_PATH").unwrap_or_else(|_| "claude".to_string());
 
     let default_cwd = std::env::var("DEFAULT_CWD").unwrap_or_else(|_| {
         dirs::home_dir()
@@ -53,7 +52,6 @@ fn main() -> anyhow::Result<()> {
         client_token,
         client_id,
         hostname,
-        claude_path,
         default_cwd,
     });
 
@@ -79,10 +77,6 @@ fn main() -> anyhow::Result<()> {
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-        rt.spawn(async {
-            crate::vm::cleanup::startup_sweep().await;
-            crate::vm::cleanup::run().await;
-        });
         rt.block_on(connection::run_forever(
             config_clone,
             tray_state_bg,

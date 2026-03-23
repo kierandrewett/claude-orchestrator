@@ -9,5 +9,5 @@ pub mod profiles;
 pub use auth::{AuthCredentials, AuthManager};
 pub use config::{ContainerConfig, MountPoint, NetworkMode, SessionData};
 pub use handle::ContainerHandle;
-pub use manager::ContainerManager;
+pub use manager::{ContainerManager, SlashCommand};
 pub use profiles::{load_profiles, Profile};

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::info;
 
 /// Stored credentials from the Claude OAuth flow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,216 +64,65 @@ impl AuthManager {
 
     /// Run the interactive OAuth login flow inside a temporary Docker container.
     ///
-    /// Spins up a container with `claude login`, watches stdout for the OAuth
-    /// URL, prints it for the user to open, waits for credentials to appear,
-    /// copies them out, and destroys the container.
-    pub async fn login(&self, docker: &bollard::Docker, image: &str) -> Result<AuthCredentials> {
-        use bollard::container::{Config, CreateContainerOptions, StartContainerOptions};
-        use bollard::exec::{CreateExecOptions, StartExecResults};
-
+    /// Runs `docker run -it` with the credentials directory mounted as a volume
+    /// so the user can complete the OAuth flow interactively and credentials are
+    /// written directly to the host mount (no copy-from-container needed).
+    pub async fn login(&self, _docker: &bollard::Docker, image: &str) -> Result<AuthCredentials> {
         std::fs::create_dir_all(&self.claude_home_path)
             .context("creating auth credentials directory")?;
 
-        let container_name = format!("claude-auth-{}", uuid::Uuid::new_v4());
+        // Pre-seed .claude.json so Claude Code skips the first-run theme wizard.
+        // This file lives at /home/claude/.claude.json inside the container, which
+        // is the parent of our .claude/ mount, so we keep a copy in the credentials
+        // dir and bind-mount it separately.
+        //
+        // Always overwrite so that stale seeds (e.g. missing hasCompletedOnboarding)
+        // get corrected on the next login attempt.
+        let global_cfg_path = self.claude_home_path.join("global.json");
+        // Include /workspace as a trusted project so real sessions skip the
+        // safety-check dialog.  The login container uses -w /tmp to avoid
+        // triggering that dialog during setup itself.
+        std::fs::write(
+            &global_cfg_path,
+            r#"{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.2","numStartups":1,"autoUpdates":false,"projects":{"/workspace":{"hasTrustDialogAccepted":true,"projectOnboardingSeenCount":1,"allowedTools":[],"mcpContextUris":[],"mcpServers":{},"enabledMcpjsonServers":[],"disabledMcpjsonServers":[],"hasClaudeMdExternalIncludesApproved":false,"hasClaudeMdExternalIncludesWarningShown":false},"/tmp":{"hasTrustDialogAccepted":true,"projectOnboardingSeenCount":1,"allowedTools":[],"mcpContextUris":[],"mcpServers":{},"enabledMcpjsonServers":[],"disabledMcpjsonServers":[],"hasClaudeMdExternalIncludesApproved":false,"hasClaudeMdExternalIncludesWarningShown":false}}}"#,
+        )
+        .context("pre-seeding global.json")?;
 
-        info!("auth: creating temporary login container {container_name}");
+        info!("auth: starting interactive login container");
 
-        // Create a container that runs `claude login` (not the NDJSON entrypoint).
-        let config = Config {
-            image: Some(image),
-            cmd: Some(vec!["sh", "-c", "claude login"]),
-            entrypoint: Some(vec!["sh", "-c", "claude login"]),
-            attach_stdout: Some(true),
-            attach_stderr: Some(true),
-            open_stdin: Some(true),
-            tty: Some(false),
-            ..Default::default()
-        };
-
-        let create_result = docker
-            .create_container(
-                Some(CreateContainerOptions {
-                    name: container_name.as_str(),
-                    platform: None,
-                }),
-                config,
-            )
-            .await
-            .context("creating auth container")?;
-
-        let container_id = create_result.id;
-
-        // Ensure we clean up even on error.
-        let cleanup = CleanupGuard {
-            docker: docker.clone(),
-            container_id: container_id.clone(),
-        };
-
-        docker
-            .start_container(&container_id, None::<StartContainerOptions<String>>)
-            .await
-            .context("starting auth container")?;
-
-        // Attach to stdout to watch for the OAuth URL.
-        use bollard::container::AttachContainerOptions;
-        let mut attach = docker
-            .attach_container(
-                &container_id,
-                Some(AttachContainerOptions::<String> {
-                    stdout: Some(true),
-                    stderr: Some(true),
-                    stream: Some(true),
-                    ..Default::default()
-                }),
-            )
-            .await
-            .context("attaching to auth container")?;
-
-        use futures_util::StreamExt;
-        let timeout = tokio::time::Duration::from_secs(300);
-        let deadline = tokio::time::Instant::now() + timeout;
-
-        // Read lines until we find the OAuth URL.
-        loop {
-            if tokio::time::Instant::now() > deadline {
-                bail!("auth: timed out waiting for OAuth URL (5 minutes)");
-            }
-
-            tokio::select! {
-                output = attach.output.next() => {
-                    match output {
-                        None => bail!("auth: container stdout ended without producing OAuth URL"),
-                        Some(Ok(msg)) => {
-                            use bollard::container::LogOutput;
-                            let text = match msg {
-                                LogOutput::StdOut { message } | LogOutput::StdErr { message } => {
-                                    String::from_utf8_lossy(&message).to_string()
-                                }
-                                _ => continue,
-                            };
-                            // Print all output so the user can see the URL.
-                            print!("{text}");
-                            if text.contains("claude.ai/oauth") || text.contains("https://") {
-                                println!("\n\nWaiting for authentication to complete...");
-                                break;
-                            }
-                        }
-                        Some(Err(e)) => bail!("auth: container output error: {e}"),
-                    }
-                }
-                _ = tokio::time::sleep_until(deadline) => {
-                    bail!("auth: timed out waiting for OAuth URL");
-                }
-            }
-        }
-
-        // Poll for the credentials file to appear inside the container.
-        let credentials_inside = "/root/.claude/.credentials.json";
-        for _ in 0..120 {
-            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-
-            let exec = docker
-                .create_exec(
-                    &container_id,
-                    CreateExecOptions {
-                        cmd: Some(vec!["test", "-f", credentials_inside]),
-                        attach_stdout: Some(false),
-                        attach_stderr: Some(false),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .context("creating exec to check credentials")?;
-
-            let result = docker
-                .start_exec(&exec.id, None)
-                .await
-                .context("running exec to check credentials")?;
-
-            if let StartExecResults::Detached = result {
-                // Wait for the exec to finish.
-                let inspect = docker.inspect_exec(&exec.id).await.ok();
-                let exit_code = inspect
-                    .and_then(|i| i.exit_code)
-                    .unwrap_or(1);
-
-                if exit_code == 0 {
-                    info!("auth: credentials file appeared in container");
-                    break;
-                }
-            }
-        }
-
-        // Copy the credentials file out of the container.
-        self.copy_credentials_from_container(docker, &container_id, credentials_inside)
-            .await
-            .context("copying credentials from container")?;
-
-        let creds = self.load().context("loading copied credentials")?;
-        info!("auth: credentials saved to {}", self.claude_home_path.display());
-
-        // cleanup runs on drop — destroys the container.
-        drop(cleanup);
-
-        Ok(creds)
-    }
-
-    async fn copy_credentials_from_container(
-        &self,
-        docker: &bollard::Docker,
-        container_id: &str,
-        src_path: &str,
-    ) -> Result<()> {
-        use futures_util::StreamExt;
-
-        let mut stream = docker.download_from_container(
-            container_id,
-            Some(bollard::container::DownloadFromContainerOptions { path: src_path }),
+        let claude_dir_mount = format!(
+            "{}:/home/claude/.claude",
+            self.claude_home_path.display()
+        );
+        let global_cfg_mount = format!(
+            "{}:/home/claude/.claude.json",
+            global_cfg_path.display()
         );
 
-        let mut tar_data = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            tar_data.extend_from_slice(&chunk.context("reading tar chunk")?);
+        // Run interactively so the user can complete the OAuth flow in their
+        // terminal.  The credentials directory is mounted directly so no
+        // copy-from-container step is required.
+        let status = tokio::process::Command::new("docker")
+            .args([
+                "run", "--rm", "-it",
+                "--entrypoint", "sh",
+                "-w", "/tmp",
+                "-v", &claude_dir_mount,
+                "-v", &global_cfg_mount,
+                image,
+                "-c", "claude login",
+            ])
+            .status()
+            .await
+            .context("running docker login container")?;
+
+        if !status.success() {
+            bail!("auth: docker login container exited with {status}");
         }
 
-        // Unpack the single-file tar into our credentials path.
-        let cursor = std::io::Cursor::new(tar_data);
-        let mut archive = tar::Archive::new(cursor);
-        if let Some(entry) = archive.entries().context("reading tar entries")?.next() {
-            let mut entry = entry.context("reading tar entry")?;
-            let dest = self.credentials_path.clone();
-            std::fs::create_dir_all(dest.parent().unwrap()).ok();
-            entry
-                .unpack(&dest)
-                .context("unpacking credentials file")?;
-        }
-
-        Ok(())
+        let creds = self.load().context("loading credentials after login")?;
+        info!("auth: credentials saved to {}", self.claude_home_path.display());
+        Ok(creds)
     }
 }
 
-/// RAII guard that destroys the container when dropped.
-struct CleanupGuard {
-    docker: bollard::Docker,
-    container_id: String,
-}
-
-impl Drop for CleanupGuard {
-    fn drop(&mut self) {
-        let docker = self.docker.clone();
-        let id = self.container_id.clone();
-        // Spawn a detached cleanup task.
-        tokio::spawn(async move {
-            warn!("auth: removing temporary container {id}");
-            let _ = docker
-                .remove_container(
-                    &id,
-                    Some(bollard::container::RemoveContainerOptions {
-                        force: true,
-                        ..Default::default()
-                    }),
-                )
-                .await;
-        });
-    }
-}

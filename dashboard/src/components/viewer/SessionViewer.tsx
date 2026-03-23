@@ -1,41 +1,38 @@
 import { useNavigate } from '@tanstack/react-router';
-import { ArrowLeft, FolderOpen, Square } from 'lucide-react';
+import { ArrowLeft, Square } from 'lucide-react';
 import { useQuery, useMutation } from '@tanstack/react-query';
-import { fetchSessions, fetchHistory, killSession } from '../../api/client';
+import { fetchTasks, stopTask } from '../../api/client';
 import { sessionRoute } from '../../router';
 import { cn, getStatusBgColor, getStatusDot } from '../../lib/utils';
 import { StatsPanel } from './StatsPanel';
 import { EventStream } from './EventStream';
 import { InputBar } from './InputBar';
-import type { SessionInfo, ClaudeEvent } from '../../types';
+import type { TaskInfo, OrchestratorEvent } from '../../types';
 
 export function SessionViewer() {
     const { id } = sessionRoute.useParams();
     const navigate = useNavigate();
 
-    const { data: sessionsData } = useQuery({
-        queryKey: ['sessions'],
-        queryFn: fetchSessions,
+    const { data: tasksData } = useQuery({
+        queryKey: ['tasks'],
+        queryFn: fetchTasks,
         staleTime: 0,
     });
-    const session: SessionInfo | undefined = sessionsData?.sessions.find((s) => s.id === id);
+    const task: TaskInfo | undefined = tasksData?.tasks.find((t) => t.id === id);
 
-    // Fetch history — staleTime: Infinity means we use the cached version if available.
-    // SSE appends new events to the cache so we never lose messages on re-navigation.
-    const { data: historyData } = useQuery({
+    const { data: events } = useQuery<OrchestratorEvent[]>({
         queryKey: ['history', id],
-        queryFn: () => fetchHistory(id),
         staleTime: Infinity,
         enabled: !!id,
     });
-    const events: ClaudeEvent[] = historyData?.events ?? [];
+    const taskEvents: OrchestratorEvent[] = events ?? [];
 
-    const killMutation = useMutation({ mutationFn: () => killSession(id) });
+    const stopMutation = useMutation({ mutationFn: () => stopTask(id) });
 
-    if (!session) {
+    if (!task) {
         return (
             <div className="flex flex-col items-center justify-center h-full gap-3 text-zinc-600">
-                <p className="text-sm">Session not found.</p>
+                <p className="text-sm">Task not found.</p>
                 <button
                     onClick={() => void navigate({ to: '/' })}
                     className="text-sm text-zinc-500 hover:text-zinc-300 flex items-center gap-1.5 transition-colors"
@@ -46,21 +43,16 @@ export function SessionViewer() {
         );
     }
 
-    const displayName =
-        session.name || session.cwd.split('/').filter(Boolean).pop() || session.id.slice(0, 8);
+    const isRunning = task.state === 'Running';
 
-    const isRunning = session.status === 'running';
-    const isPending = session.status === 'pending';
-
-    const handleKill = () => {
-        if (window.confirm(`Stop session "${displayName}"?`)) {
-            killMutation.mutate();
+    const handleStop = () => {
+        if (window.confirm(`Stop task "${task.name}"?`)) {
+            stopMutation.mutate();
         }
     };
 
     return (
         <div className="flex flex-col h-full overflow-hidden">
-            {/* Session header — sticky */}
             <div className="flex items-center gap-2 px-3 py-2.5 border-b border-zinc-800/80 bg-zinc-950 shrink-0">
                 <button
                     onClick={() => void navigate({ to: '/' })}
@@ -71,39 +63,20 @@ export function SessionViewer() {
 
                 <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 min-w-0">
-                        <span
-                            className={cn(
-                                'w-2 h-2 rounded-full shrink-0',
-                                getStatusDot(session.status),
-                                isRunning && 'animate-pulse-dot',
-                            )}
-                        />
-                        <h1 className="text-sm font-semibold text-zinc-100 truncate">
-                            {displayName}
-                        </h1>
-                        <span
-                            className={cn(
-                                'text-[10px] font-medium px-1.5 py-0.5 rounded-full ring-1 ring-inset shrink-0',
-                                getStatusBgColor(session.status),
-                            )}
-                        >
-                            {session.status}
+                        <span className={cn('w-2 h-2 rounded-full shrink-0', getStatusDot(task.state), isRunning && 'animate-pulse-dot')} />
+                        <h1 className="text-sm font-semibold text-zinc-100 truncate">{task.name}</h1>
+                        <span className={cn('text-[10px] font-medium px-1.5 py-0.5 rounded-full ring-1 ring-inset shrink-0', getStatusBgColor(task.state))}>
+                            {task.state}
                         </span>
                     </div>
-
-                    {session.cwd && (
-                        <div className="flex items-center gap-1 mt-0.5 ml-4">
-                            <FolderOpen size={10} className="text-zinc-700" />
-                            <span className="text-[11px] text-zinc-600 font-mono truncate">
-                                {session.cwd}
-                            </span>
-                        </div>
-                    )}
+                    <div className="mt-0.5 ml-4">
+                        <span className="text-[11px] text-zinc-600 font-mono">{task.profile}</span>
+                    </div>
                 </div>
 
                 {isRunning && (
                     <button
-                        onClick={handleKill}
+                        onClick={handleStop}
                         className="flex items-center gap-1 px-2.5 py-1.5 text-xs rounded-lg border border-red-900/30 bg-red-950/20 text-red-500 hover:bg-red-950/40 transition-colors shrink-0"
                     >
                         <Square size={11} />
@@ -112,11 +85,11 @@ export function SessionViewer() {
                 )}
             </div>
 
-            <StatsPanel session={session} />
-            <EventStream events={events} />
+            <StatsPanel task={task} />
+            <EventStream events={taskEvents} />
 
-            {(isPending || isRunning) && (
-                <InputBar sessionId={session.id} onKill={handleKill} pending={isPending} />
+            {isRunning && (
+                <InputBar taskId={task.id} onStop={handleStop} />
             )}
         </div>
     );

@@ -222,6 +222,11 @@ pub enum S2C {
     KillSession {
         session_id: String,
     },
+    /// Interrupt the current Claude response (SIGINT) without ending the
+    /// session.  Claude stops generating and waits for the next input.
+    InterruptSession {
+        session_id: String,
+    },
     QueryCommands, // server requests client to fetch slash commands
     /// Request client to return its current VM config.
     GetVmConfig {

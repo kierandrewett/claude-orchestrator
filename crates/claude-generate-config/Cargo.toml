@@ -1,0 +1,13 @@
+[package]
+name = "claude-generate-config"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "claude-generate-config"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+dirs = "5"
+serde_json = { workspace = true }

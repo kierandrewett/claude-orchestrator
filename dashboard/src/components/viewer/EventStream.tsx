@@ -1,5 +1,5 @@
 import { useEffect, useRef, useMemo, useState } from 'react';
-import type { ClaudeEvent } from '../../types';
+import type { OrchestratorEvent } from '../../types';
 import { EventRow } from './EventRow';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -36,13 +36,9 @@ export interface ConversationTurn {
 
 // ─── Event accumulator ────────────────────────────────────────────────────────
 
-function accumulateEvents(events: ClaudeEvent[]): ConversationTurn[] {
+function accumulateEvents(events: OrchestratorEvent[]): ConversationTurn[] {
     const turns: ConversationTurn[] = [];
-
-    // Current assistant turn being built
     let currentAssistantTurn: ConversationTurn | null = null;
-    // Track current block index for streaming
-    let currentBlockIndex = -1;
 
     const ensureAssistantTurn = (): ConversationTurn => {
         if (!currentAssistantTurn) {
@@ -52,209 +48,63 @@ function accumulateEvents(events: ClaudeEvent[]): ConversationTurn[] {
         return currentAssistantTurn;
     };
 
-    const finishAssistantTurn = () => {
-        if (currentAssistantTurn) {
-            // Mark all blocks as done
-            for (const block of currentAssistantTurn.blocks) {
-                if (block.type === 'text' || block.type === 'tool_use') {
-                    block.done = true;
-                }
-            }
-        }
-        currentAssistantTurn = null;
-        currentBlockIndex = -1;
-    };
-
     for (const event of events) {
-        const eventType = event['type'] as string | undefined;
-
-        // ── Streaming format ──────────────────────────────────────────────────
-
-        if (eventType === 'message_start') {
-            finishAssistantTurn();
-            ensureAssistantTurn();
-            continue;
-        }
-
-        if (eventType === 'content_block_start') {
+        if ('TextOutput' in event) {
+            const { text, is_continuation } = event.TextOutput;
             const turn = ensureAssistantTurn();
-            const contentBlock = event['content_block'] as Record<string, unknown> | undefined;
-            const blockType = contentBlock?.['type'] as string | undefined;
-            const blockIndex = (event['index'] as number | undefined) ?? turn.blocks.length;
-            currentBlockIndex = blockIndex;
-
-            if (blockType === 'text') {
-                const block: ContentBlock = { type: 'text', text: '', done: false };
-                turn.blocks[blockIndex] = block;
-            } else if (blockType === 'tool_use') {
-                const block: ContentBlock = {
-                    type: 'tool_use',
-                    id: (contentBlock?.['id'] as string | undefined) ?? '',
-                    name: (contentBlock?.['name'] as string | undefined) ?? 'unknown',
-                    input: {},
-                    inputJson: '',
-                    inputStreaming: false,
-                    done: false,
-                };
-                turn.blocks[blockIndex] = block;
+            if (is_continuation && turn.blocks.length > 0) {
+                const last = turn.blocks[turn.blocks.length - 1];
+                if (last?.type === 'text') { last.text += text; continue; }
             }
+            turn.blocks.push({ type: 'text', text, done: false });
             continue;
         }
-
-        if (eventType === 'content_block_delta') {
-            const turn = ensureAssistantTurn();
-            const delta = event['delta'] as Record<string, unknown> | undefined;
-            const deltaType = delta?.['type'] as string | undefined;
-            const blockIndex = (event['index'] as number | undefined) ?? currentBlockIndex;
-            const block = turn.blocks[blockIndex];
-
-            if (!block) continue;
-
-            if (deltaType === 'text_delta' && block.type === 'text') {
-                block.text += (delta?.['text'] as string | undefined) ?? '';
-            } else if (deltaType === 'input_json_delta' && block.type === 'tool_use') {
-                block.inputJson += (delta?.['partial_json'] as string | undefined) ?? '';
-                block.inputStreaming = true;
-                try {
-                    block.input = JSON.parse(block.inputJson) as Record<string, unknown>;
-                } catch {
-                    // partial JSON, ignore parse error
+        if ('ToolStarted' in event) {
+            const { tool_name, summary } = event.ToolStarted;
+            ensureAssistantTurn().blocks.push({
+                type: 'tool_use', id: tool_name, name: tool_name,
+                input: { _summary: summary }, inputJson: summary,
+                inputStreaming: false, done: false,
+            });
+            continue;
+        }
+        if ('ToolCompleted' in event) {
+            const { tool_name, summary, is_error, output_preview } = event.ToolCompleted;
+            if (currentAssistantTurn) {
+                const block = [...currentAssistantTurn.blocks].reverse()
+                    .find(b => b.type === 'tool_use' && b.name === tool_name && !b.done);
+                if (block?.type === 'tool_use') block.done = true;
+            }
+            turns.push({ role: 'user', blocks: [{ type: 'tool_result', tool_use_id: tool_name, content: output_preview ?? summary, is_error }] });
+            continue;
+        }
+        if ('TurnComplete' in event) {
+            if (currentAssistantTurn) {
+                for (const block of currentAssistantTurn.blocks) {
+                    if (block.type === 'text') block.done = true;
                 }
             }
+            currentAssistantTurn = null;
             continue;
         }
-
-        if (eventType === 'content_block_stop') {
-            const turn = currentAssistantTurn as ConversationTurn | null;
-            if (!turn) continue;
-            const blockIndex = (event['index'] as number | undefined) ?? currentBlockIndex;
-            const block = turn.blocks[blockIndex];
-            if (!block) continue;
-            if (block.type === 'text' || block.type === 'tool_use') {
-                block.done = true;
-                if (block.type === 'tool_use') {
-                    block.inputStreaming = false;
-                    if (block.inputJson) {
-                        try {
-                            block.input = JSON.parse(block.inputJson) as Record<string, unknown>;
-                        } catch {
-                            // keep partial
-                        }
-                    }
-                }
-            }
+        if ('Error' in event) {
+            ensureAssistantTurn().blocks.push({ type: 'text', text: `❌ ${event.Error.error}`, done: true });
+            currentAssistantTurn = null;
             continue;
         }
-
-        if (eventType === 'message_delta') {
-            // Contains stop_reason etc — no rendering needed here, handled by session stats
+        if ('CommandResponse' in event) {
+            ensureAssistantTurn().blocks.push({ type: 'text', text: event.CommandResponse.text, done: true });
+            currentAssistantTurn = null;
             continue;
         }
-
-        if (eventType === 'message_stop') {
-            finishAssistantTurn();
-            continue;
-        }
-
-        // ── Turn-complete format (assistant message) ───────────────────────────
-
-        if (eventType === 'assistant') {
-            finishAssistantTurn();
-            const message = event['message'] as Record<string, unknown> | undefined;
-            const content = (event['content'] ?? message?.['content']) as unknown[] | undefined;
-            if (!content) continue;
-
-            const assistantTurn: ConversationTurn = { role: 'assistant', blocks: [] };
-            turns.push(assistantTurn);
-
-            for (const item of content) {
-                const c = item as Record<string, unknown>;
-                const ctype = c['type'] as string | undefined;
-                if (ctype === 'text') {
-                    assistantTurn.blocks.push({
-                        type: 'text',
-                        text: (c['text'] as string | undefined) ?? '',
-                        done: true,
-                    });
-                } else if (ctype === 'tool_use') {
-                    const input = (c['input'] as Record<string, unknown> | undefined) ?? {};
-                    assistantTurn.blocks.push({
-                        type: 'tool_use',
-                        id: (c['id'] as string | undefined) ?? '',
-                        name: (c['name'] as string | undefined) ?? 'unknown',
-                        input,
-                        inputJson: JSON.stringify(input),
-                        inputStreaming: false,
-                        done: true,
-                    });
-                }
-            }
-            continue;
-        }
-
-        // ── Turn-complete format (user / tool results) ────────────────────────
-
-        if (eventType === 'user') {
-            const message = event['message'] as Record<string, unknown> | undefined;
-            const rawContent = event['content'] ?? message?.['content'];
-
-            let userText = '';
-            const toolResults: ToolResultBlock[] = [];
-
-            if (typeof rawContent === 'string') {
-                userText = rawContent;
-            } else if (Array.isArray(rawContent)) {
-                for (const item of rawContent) {
-                    const c = item as Record<string, unknown>;
-                    if (c['type'] === 'tool_result') {
-                        const rc = c['content'];
-                        let resultText = '';
-                        if (typeof rc === 'string') {
-                            resultText = rc;
-                        } else if (Array.isArray(rc)) {
-                            resultText = (rc as Array<Record<string, unknown>>)
-                                .filter((r) => r['type'] === 'text')
-                                .map((r) => r['text'] as string)
-                                .join('\n');
-                        }
-                        toolResults.push({
-                            type: 'tool_result',
-                            tool_use_id: (c['tool_use_id'] as string | undefined) ?? '',
-                            content: resultText,
-                            is_error: (c['is_error'] as boolean | undefined) ?? false,
-                        });
-                    } else if (c['type'] === 'text') {
-                        userText += (c['text'] as string | undefined) ?? '';
-                    }
-                }
-            }
-
-            if (userText) {
-                turns.push({ role: 'user', blocks: [{ type: 'text', text: userText, done: true }] });
-            }
-            if (toolResults.length > 0) {
-                turns.push({ role: 'user', blocks: toolResults });
-            }
-            continue;
-        }
-
-        // ── result event ──────────────────────────────────────────────────────
-        // (session-level summary — skip, handled by stats panel)
-        if (eventType === 'result') {
-            continue;
-        }
-
-        // ── Skip boring events ────────────────────────────────────────────────
-        // ping, heartbeat, etc.
     }
-
     return turns;
 }
 
 // ─── EventStream ──────────────────────────────────────────────────────────────
 
 interface EventStreamProps {
-    events: ClaudeEvent[];
+    events: OrchestratorEvent[];
 }
 
 export function EventStream({ events }: EventStreamProps) {

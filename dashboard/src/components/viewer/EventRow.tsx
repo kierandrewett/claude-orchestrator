@@ -50,7 +50,7 @@ function getToolSummary(name: string, input: Record<string, unknown>): string {
         WebSearch: 'query',
     }[name];
     if (!key) return '';
-    const val = input[key];
+    const val = input[key] ?? input['_summary'];
     if (typeof val !== 'string') return '';
     // Shorten: show only filename for paths
     if (key === 'file_path') return val.replace(/.*[\\/]/, '');

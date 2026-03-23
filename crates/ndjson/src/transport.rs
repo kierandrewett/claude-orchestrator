@@ -80,6 +80,11 @@ impl NdjsonTransport {
         }
     }
 
+    /// Shut down the stdin writer, signalling EOF to the subprocess / container.
+    pub async fn close_stdin(&mut self) {
+        let _ = self.stdin.shutdown().await;
+    }
+
     /// Serialise `input` as a JSON line and flush.
     pub async fn send(&mut self, input: &UserInput) -> Result<()> {
         let json = serde_json::to_string(input).context("serialising UserInput")?;

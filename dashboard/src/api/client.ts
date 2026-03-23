@@ -1,4 +1,4 @@
-import type { SessionInfo, SlashCommand, ClaudeEvent } from '../types';
+import type { TaskInfo } from '../types';
 
 const BASE = '/api';
 
@@ -11,57 +11,33 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     return res.json() as Promise<T>;
 }
 
-// ---------------------------------------------------------------------------
-// Status
-// ---------------------------------------------------------------------------
-
-export interface StatusData {
-    connected: boolean;
-    hostname: string | null;
-    commands: SlashCommand[];
+export function fetchTasks(): Promise<{ tasks: TaskInfo[] }> {
+    return apiFetch('/tasks');
 }
 
-export function fetchStatus(): Promise<StatusData> {
-    return apiFetch('/status');
-}
-
-// ---------------------------------------------------------------------------
-// Sessions
-// ---------------------------------------------------------------------------
-
-export function fetchSessions(): Promise<{ sessions: SessionInfo[] }> {
-    return apiFetch('/sessions');
-}
-
-export function createSession(params: {
-    name?: string;
-    initial_prompt?: string;
-}): Promise<{ session: SessionInfo }> {
-    return apiFetch('/sessions', {
+export function createTask(params: {
+    profile?: string;
+    prompt?: string;
+}): Promise<{ status: string }> {
+    return apiFetch('/tasks', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(params),
     });
 }
 
-// ---------------------------------------------------------------------------
-// Session actions
-// ---------------------------------------------------------------------------
-
-export function fetchHistory(
-    sessionId: string,
-): Promise<{ session_id: string; events: ClaudeEvent[] }> {
-    return apiFetch(`/sessions/${sessionId}/history`);
-}
-
-export function sendInput(sessionId: string, text: string): Promise<{ ok: boolean }> {
-    return apiFetch(`/sessions/${sessionId}/input`, {
+export function sendInput(taskId: string, text: string): Promise<{ status: string }> {
+    return apiFetch(`/tasks/${taskId}/message`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
     });
 }
 
-export function killSession(sessionId: string): Promise<{ ok: boolean }> {
-    return apiFetch(`/sessions/${sessionId}`, { method: 'DELETE' });
+export function stopTask(taskId: string): Promise<{ status: string }> {
+    return apiFetch(`/tasks/${taskId}`, { method: 'DELETE' });
+}
+
+export function hibernateTask(taskId: string): Promise<{ status: string }> {
+    return apiFetch(`/tasks/${taskId}/hibernate`, { method: 'POST' });
 }

@@ -1,9 +1,7 @@
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
-use std::process::Stdio;
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc, Mutex as TokioMutex};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
@@ -17,7 +15,6 @@ pub struct Config {
     pub client_token: String,
     pub client_id: String,
     pub hostname: String,
-    pub claude_path: String,
     pub default_cwd: String,
 }
 
@@ -316,141 +313,18 @@ async fn handle_text_message(
             route_to_session(session_map, session_id, msg.clone()).await;
         }
 
-        S2C::GetVmConfig { request_id } => {
-            let ws_tx_clone = Arc::clone(ws_tx);
-            tokio::spawn(async move {
-                let cfg = match crate::vm::config::VmConfig::load() {
-                    Ok(Some(cfg)) => cfg,
-                    // No file yet — return auto-detected defaults so the server
-                    // can show them to the user before they've run /vminit.
-                    Ok(None) => crate::vm::config::VmConfig::detect_defaults(),
-                    Err(e) => {
-                        ws_send(
-                            &ws_tx_clone,
-                            &C2S::VmConfigAck {
-                                request_id,
-                                success: false,
-                                error: Some(e.to_string()),
-                            },
-                        )
-                        .await;
-                        return;
-                    }
-                };
-                ws_send(
-                    &ws_tx_clone,
-                    &C2S::VmConfig {
-                        request_id,
-                        config: cfg.into(),
-                    },
-                )
-                .await;
-            });
+        S2C::InterruptSession { ref session_id } => {
+            info!("InterruptSession: session_id={session_id}");
+            route_to_session(session_map, session_id, msg.clone()).await;
         }
 
-        S2C::SetVmConfig { request_id, config } => {
-            let ws_tx_clone = Arc::clone(ws_tx);
-            tokio::spawn(async move {
-                let vm_cfg: crate::vm::config::VmConfig = config.into();
-                let result = vm_cfg.save();
-                ws_send(
-                    &ws_tx_clone,
-                    &C2S::VmConfigAck {
-                        request_id,
-                        success: result.is_ok(),
-                        error: result.err().map(|e| e.to_string()),
-                    },
-                )
-                .await;
-            });
-        }
-
-        S2C::BuildImage { request_id } => {
-            let ws_tx_clone = Arc::clone(ws_tx);
-            tokio::spawn(async move {
-                let cfg = match crate::vm::config::VmConfig::load() {
-                    Ok(Some(c)) => c,
-                    Ok(None) => crate::vm::config::VmConfig::detect_defaults(),
-                    Err(e) => {
-                        ws_send(
-                            &ws_tx_clone,
-                            &C2S::BuildImageResult {
-                                request_id,
-                                success: false,
-                                error: Some(format!("failed to load vm config: {e}")),
-                            },
-                        )
-                        .await;
-                        return;
-                    }
-                };
-
-                let dockerfile = crate::vm::config::VmConfig::dockerfile_path();
-
-                // Write (or overwrite) the Dockerfile from the current config.
-                if let Err(e) = crate::vm::rootfs::write_dockerfile(
-                    &cfg.base_image,
-                    &cfg.tools.extra_packages,
-                    &dockerfile,
-                )
-                .await
-                {
-                    ws_send(
-                        &ws_tx_clone,
-                        &C2S::BuildImageResult {
-                            request_id,
-                            success: false,
-                            error: Some(format!("failed to write Dockerfile: {e}")),
-                        },
-                    )
-                    .await;
-                    return;
-                }
-
-                // Stream log lines back to the server as they arrive.
-                let (log_tx, mut log_rx) =
-                    tokio::sync::mpsc::unbounded_channel::<String>();
-                let ws_for_logs = Arc::clone(&ws_tx_clone);
-                let req_id_for_logs = request_id.clone();
-                tokio::spawn(async move {
-                    while let Some(line) = log_rx.recv().await {
-                        ws_send(
-                            &ws_for_logs,
-                            &C2S::BuildImageLog {
-                                request_id: req_id_for_logs.clone(),
-                                line,
-                            },
-                        )
-                        .await;
-                    }
-                });
-
-                let (success, error) =
-                    match crate::vm::rootfs::build(&cfg.image, &dockerfile, log_tx).await {
-                        Ok(()) => (true, None),
-                        Err(e) => (false, Some(e.to_string())),
-                    };
-
-                ws_send(
-                    &ws_tx_clone,
-                    &C2S::BuildImageResult {
-                        request_id,
-                        success,
-                        error,
-                    },
-                )
-                .await;
-            });
+        S2C::GetVmConfig { .. } | S2C::SetVmConfig { .. } | S2C::BuildImage { .. } => {
+            // VM/container mode is not supported in the native client.
         }
 
         S2C::QueryCommands => {
-            info!("QueryCommands: discovering slash commands");
-            let claude_path = config.claude_path.clone();
-            let ws_tx_clone = Arc::clone(ws_tx);
-            tokio::spawn(async move {
-                let commands = discover_commands(&claude_path).await;
-                ws_send(&ws_tx_clone, &C2S::CommandList { commands }).await;
-            });
+            // Slash command discovery now happens server-side inside a container.
+            // The client no longer needs a local claude binary for this.
         }
     }
 }
@@ -490,116 +364,3 @@ async fn ws_send(ws_tx: &Arc<TokioMutex<WsSink>>, msg: &C2S) {
     send_msg(ws_tx, msg).await;
 }
 
-/// Discovers available slash commands by spawning Claude Code with stream-json
-/// and sending `/help`, then parsing the text response for slash command names
-/// and descriptions.
-async fn discover_commands(claude_path: &str) -> Vec<claude_shared::SlashCommand> {
-    let mut cmd = tokio::process::Command::new(claude_path);
-    cmd.args([
-        "--print",
-        "--input-format",
-        "stream-json",
-        "--output-format",
-        "stream-json",
-        "--dangerously-skip-permissions",
-    ])
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null())
-    .kill_on_drop(true);
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            warn!("discover_commands: failed to spawn claude: {e}");
-            return vec![];
-        }
-    };
-
-    let mut stdin = child.stdin.take().expect("stdin was piped");
-    let stdout = child.stdout.take().expect("stdout was piped");
-
-    let help_msg = concat!(
-        r#"{"type":"user","message":{"role":"user","content":"/help"}}"#,
-        "\n"
-    );
-    if let Err(e) = stdin.write_all(help_msg.as_bytes()).await {
-        warn!("discover_commands: stdin write error: {e}");
-        return vec![];
-    }
-    drop(stdin); // signal EOF so claude knows there's no more input
-
-    let mut lines = BufReader::new(stdout).lines();
-    let mut full_text = String::new();
-
-    let read_fut = async {
-        while let Ok(Some(line)) = lines.next_line().await {
-            let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
-                continue;
-            };
-            match event.get("type").and_then(|t| t.as_str()).unwrap_or("") {
-                "content_block_delta" => {
-                    if let Some(text) = event.pointer("/delta/text").and_then(|t| t.as_str()) {
-                        full_text.push_str(text);
-                    }
-                }
-                "result" => {
-                    if let Some(text) = event.get("result").and_then(|t| t.as_str()) {
-                        if full_text.is_empty() {
-                            full_text = text.to_string();
-                        }
-                    }
-                    break;
-                }
-                _ => {}
-            }
-        }
-    };
-
-    match tokio::time::timeout(std::time::Duration::from_secs(30), read_fut).await {
-        Ok(()) => {}
-        Err(_) => {
-            warn!("discover_commands: timed out waiting for /help response");
-            let _ = child.kill().await;
-        }
-    }
-    let _ = child.wait().await;
-
-    if full_text.is_empty() {
-        return vec![];
-    }
-
-    parse_slash_commands(&full_text)
-}
-
-fn parse_slash_commands(text: &str) -> Vec<claude_shared::SlashCommand> {
-    let mut commands = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if !line.starts_with('/') {
-            continue;
-        }
-
-        // Try "name - desc" or "name: desc" patterns
-        if let Some((name, desc)) = line.split_once(" - ").or_else(|| line.split_once(": ")) {
-            let name = name.trim().to_string();
-            let desc = desc.trim().to_string();
-            if name.starts_with('/') && !name.contains(' ') {
-                commands.push(claude_shared::SlashCommand {
-                    name,
-                    description: desc,
-                });
-            }
-        } else {
-            // Just the command name, no description
-            let name = line.split_whitespace().next().unwrap_or("").to_string();
-            if name.starts_with('/') {
-                commands.push(claude_shared::SlashCommand {
-                    name,
-                    description: String::new(),
-                });
-            }
-        }
-    }
-    commands
-}

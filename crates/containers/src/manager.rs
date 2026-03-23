@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use bollard::container::{
@@ -6,12 +7,19 @@ use bollard::container::{
     StartContainerOptions, StopContainerOptions,
 };
 use bollard::models::{HostConfig, Mount, MountTypeEnum};
-use claude_ndjson::{NdjsonTransport, UserInput};
-use tracing::info;
+use claude_ndjson::{ClaudeEvent, NdjsonTransport, UserInput};
+use tracing::{info, warn};
 
 use crate::auth::AuthManager;
 use crate::config::{new_session_id, ContainerConfig, NetworkMode, SessionData};
 use crate::handle::ContainerHandle;
+
+/// A slash command discovered by running `/help` inside a container.
+#[derive(Debug, Clone)]
+pub struct SlashCommand {
+    pub name: String,
+    pub description: String,
+}
 
 /// Manages Docker container lifecycle for Claude Code sessions.
 pub struct ContainerManager {
@@ -253,6 +261,111 @@ impl ContainerManager {
         .await
     }
 
+    /// Run `/help` inside a one-shot container and return the slash commands Claude exposes.
+    ///
+    /// Creates a temporary container from `image`, sends `/help` via stream-json stdin,
+    /// parses the text response, then destroys the container.
+    pub async fn discover_slash_commands(&self, image: &str) -> Result<Vec<SlashCommand>> {
+        let container_config = Config {
+            image: Some(image),
+            // Run in --print (non-interactive) stream-json mode, same as the client did locally.
+            cmd: Some(vec![
+                "--print",
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--dangerously-skip-permissions",
+            ]),
+            attach_stdin: Some(true),
+            attach_stdout: Some(true),
+            attach_stderr: Some(false),
+            open_stdin: Some(true),
+            stdin_once: Some(true),
+            host_config: Some(HostConfig {
+                mounts: Some(vec![Mount {
+                    target: Some("/home/claude/.claude".to_string()),
+                    source: Some(self.auth.claude_home_path.to_string_lossy().to_string()),
+                    typ: Some(MountTypeEnum::BIND),
+                    read_only: Some(false),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let container = self
+            .docker
+            .create_container(None::<CreateContainerOptions<String>>, container_config)
+            .await
+            .context("creating slash-command discovery container")?;
+        let container_id = container.id;
+        info!("slash-command discovery: created container {container_id}");
+
+        let result = self.run_help_query(&container_id).await;
+        let _ = self.destroy(&container_id).await;
+        result
+    }
+
+    async fn run_help_query(&self, container_id: &str) -> Result<Vec<SlashCommand>> {
+        let attach = self
+            .docker
+            .attach_container(
+                container_id,
+                Some(AttachContainerOptions::<String> {
+                    stdin: Some(true),
+                    stdout: Some(true),
+                    stderr: Some(false),
+                    stream: Some(true),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .context("attaching to discovery container")?;
+
+        self.docker
+            .start_container(container_id, None::<StartContainerOptions<String>>)
+            .await
+            .context("starting discovery container")?;
+
+        let mut transport = NdjsonTransport::from_bollard_attach(attach);
+        transport
+            .send(&UserInput::user("/help"))
+            .await
+            .context("sending /help to discovery container")?;
+        transport.close_stdin().await;
+
+        let mut full_text = String::new();
+        let read_fut = async {
+            loop {
+                match transport.next_event().await {
+                    Ok(Some(ClaudeEvent::Result(r))) => {
+                        if let Some(text) = r.result {
+                            full_text = text;
+                        }
+                        break;
+                    }
+                    Ok(None) => break,
+                    Ok(Some(_)) => continue,
+                    Err(e) => {
+                        warn!("slash-command discovery: read error: {e}");
+                        break;
+                    }
+                }
+            }
+        };
+
+        if tokio::time::timeout(Duration::from_secs(30), read_fut)
+            .await
+            .is_err()
+        {
+            warn!("slash-command discovery: timed out");
+        }
+
+        Ok(parse_slash_commands(&full_text))
+    }
+
     /// Check whether a container exists and is running.
     pub async fn is_running(&self, container_id: &str) -> bool {
         match self.docker.inspect_container(container_id, None).await {
@@ -263,4 +376,26 @@ impl ContainerManager {
             Err(_) => false,
         }
     }
+}
+
+fn parse_slash_commands(text: &str) -> Vec<SlashCommand> {
+    let mut commands = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if !line.starts_with('/') {
+            continue;
+        }
+        if let Some((name, desc)) = line.split_once(" - ").or_else(|| line.split_once(": ")) {
+            let name = name.trim().to_string();
+            if name.starts_with('/') && !name.contains(' ') {
+                commands.push(SlashCommand { name, description: desc.trim().to_string() });
+            }
+        } else {
+            let name = line.split_whitespace().next().unwrap_or("").to_string();
+            if name.starts_with('/') {
+                commands.push(SlashCommand { name, description: String::new() });
+            }
+        }
+    }
+    commands
 }
