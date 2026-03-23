@@ -438,4 +438,40 @@ async fn disconnect(state: &Arc<AppState>) {
             hostname: None,
         })
         .await;
+
+    // Mark every Running/Pending session as Failed — the client lost them on
+    // disconnect and they will never send SessionEnded for these sessions.
+    let ended: Vec<SessionInfo> = {
+        let mut guard = state.sessions.write().await;
+        guard
+            .values_mut()
+            .filter(|buf| {
+                matches!(
+                    buf.info.status,
+                    SessionStatus::Running | SessionStatus::Pending
+                )
+            })
+            .map(|buf| {
+                buf.info.status = SessionStatus::Failed;
+                buf.info.ended_at = Some(Utc::now());
+                buf.info.clone()
+            })
+            .collect()
+    };
+
+    for info in ended {
+        state.store.save_session(&info).await.ok();
+        state
+            .broadcast(&S2D::SessionUpdated { session: info.clone() })
+            .await;
+        state
+            .broadcast(&S2D::SessionEnded {
+                session_id: info.id.clone(),
+                stats: info.stats.clone(),
+                exit_code: -1,
+                error: Some("client disconnected".to_string()),
+            })
+            .await;
+        info!("client_ws: marked session {} as Failed (client disconnected)", info.id);
+    }
 }
