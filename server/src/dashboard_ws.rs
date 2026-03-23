@@ -21,6 +21,7 @@ pub async fn handler(
     state: web::Data<Arc<AppState>>,
 ) -> Result<HttpResponse, Error> {
     let (response, ws_session, msg_stream) = actix_ws::handle(&req, stream)?;
+    let msg_stream = msg_stream.max_frame_size(128 * 1024 * 1024);
 
     let state_clone: Arc<AppState> = Arc::clone(&state);
     actix_rt::spawn(run(ws_session, msg_stream, state_clone));

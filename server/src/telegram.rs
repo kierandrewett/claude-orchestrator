@@ -43,6 +43,33 @@ use crate::{
 };
 
 // ---------------------------------------------------------------------------
+// Polling error handler — silences expected long-poll timeouts
+// ---------------------------------------------------------------------------
+
+/// Error handler for `dispatch_with_listener` that ignores network timeouts
+/// (which are normal for long-poll getUpdates) and logs everything else.
+struct SilentPollErrorHandler;
+
+impl teloxide::error_handlers::ErrorHandler<teloxide::RequestError> for SilentPollErrorHandler {
+    fn handle_error(
+        self: Arc<Self>,
+        err: teloxide::RequestError,
+    ) -> futures_util::future::BoxFuture<'static, ()> {
+        Box::pin(async move {
+            use teloxide::RequestError;
+            match &err {
+                RequestError::Network(e) if e.is_timeout() => {
+                    // Long-poll expiry — completely normal, no need to log.
+                }
+                _ => {
+                    warn!("telegram: update listener error: {err}");
+                }
+            }
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
@@ -204,9 +231,9 @@ impl MessagingProvider for TelegramProvider {
             .build()
             .dispatch_with_listener(
                 listener,
-                teloxide::error_handlers::LoggingErrorHandler::with_custom_text(
-                    "telegram: update listener error",
-                ),
+                // Long-poll timeouts are normal — suppress them so they don't
+                // flood the log at ERROR level.
+                Arc::new(SilentPollErrorHandler),
             )
             .await;
     }
