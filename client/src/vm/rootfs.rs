@@ -92,7 +92,8 @@ fi
          {install_cmd}\n\
          RUN npm install -g @anthropic-ai/claude-code\n\
          COPY entrypoint.sh /entrypoint.sh\n\
-         RUN chmod +x /entrypoint.sh\n"
+         RUN chmod +x /entrypoint.sh\n\
+         ENTRYPOINT [\"/entrypoint.sh\"]\n"
     );
 
     tokio::fs::write(path, &dockerfile)

@@ -329,11 +329,12 @@ fn new_container_cmd(
         "--label", &format!("claude.claude_session_id={}", config.claude_session_id),
     ]);
 
-    // Image + explicit entrypoint invocation (more robust than relying on the
-    // image's ENTRYPOINT directive — also ensures docker start -a -i replays
-    // the correct command on restart).
+    // Override entrypoint explicitly so the behaviour is independent of
+    // whatever ENTRYPOINT the image was built with.
+    cmd.args(["--entrypoint", "/entrypoint.sh"]);
+
+    // Image — no CMD args; docker start -a -i replays this same invocation.
     cmd.arg(&vm_cfg.image);
-    cmd.arg("/entrypoint.sh");
 
     // Forward any extra args to the entrypoint / claude.
     for arg in &config.extra_args {
