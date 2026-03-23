@@ -49,7 +49,7 @@ impl NdjsonTransport {
                     Some(Ok(message))
                 }
                 Ok(_) => None,
-                Err(e) => Some(Err(std::io::Error::new(std::io::ErrorKind::Other, e))),
+                Err(e) => Some(Err(std::io::Error::other(e))),
             };
             std::future::ready(item)
         });

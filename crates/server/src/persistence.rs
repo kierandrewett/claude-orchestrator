@@ -1,12 +1,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use claude_containers::SessionData;
@@ -42,43 +39,13 @@ pub struct PersistedState {
 
 pub struct StateStore {
     path: PathBuf,
-    last_save: Arc<Mutex<Option<Instant>>>,
 }
 
 impl StateStore {
     pub fn new(state_dir: &Path) -> Self {
         Self {
             path: state_dir.join("state.json"),
-            last_save: Arc::new(Mutex::new(None)),
         }
-    }
-
-    pub async fn save(&self, state: &PersistedState) -> Result<()> {
-        // Debounce: at most once per second.
-        {
-            let mut last = self.last_save.lock().await;
-            if let Some(t) = *last {
-                if t.elapsed() < Duration::from_secs(1) {
-                    return Ok(());
-                }
-            }
-            *last = Some(Instant::now());
-        }
-
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating state dir {}", parent.display()))?;
-        }
-
-        let json = serde_json::to_string_pretty(state).context("serialising state")?;
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, &json)
-            .with_context(|| format!("writing state to {}", tmp.display()))?;
-        std::fs::rename(&tmp, &self.path)
-            .with_context(|| format!("renaming state file to {}", self.path.display()))?;
-
-        info!("persistence: saved {} tasks", state.tasks.len());
-        Ok(())
     }
 
     pub fn load(&self) -> Result<PersistedState> {
@@ -107,5 +74,40 @@ impl StateStore {
                 Ok(PersistedState::default())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_missing_file_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+        let state = store.load().unwrap();
+        assert!(state.tasks.is_empty());
+    }
+
+    #[test]
+    fn load_valid_state_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = r#"{"tasks":[]}"#;
+        std::fs::write(dir.path().join("state.json"), json).unwrap();
+        let store = StateStore::new(dir.path());
+        let state = store.load().unwrap();
+        assert!(state.tasks.is_empty());
+    }
+
+    #[test]
+    fn load_corrupt_file_returns_empty_and_backs_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, b"not valid json{{{").unwrap();
+        let store = StateStore::new(dir.path());
+        let state = store.load().unwrap();
+        assert!(state.tasks.is_empty());
+        // Backup file should exist
+        assert!(dir.path().join("state.json.corrupt").exists());
     }
 }

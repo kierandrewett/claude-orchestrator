@@ -265,7 +265,6 @@ async fn handle_text_message(
                 session_id: sid.clone(),
                 initial_prompt: None, // delivered via cmd channel above
                 extra_args: extra_args.clone(),
-                claude_path: config.claude_path.clone(),
                 claude_session_id: claude_session_id.clone(),
                 is_resume,
                 default_cwd: config.default_cwd.clone(),

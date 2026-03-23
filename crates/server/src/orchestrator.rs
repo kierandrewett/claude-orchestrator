@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use anyhow::Result;
 use tracing::{debug, error, info};
 
 use claude_containers::{ContainerConfig, ContainerManager};
@@ -8,19 +7,15 @@ use claude_events::{
     BackendEvent, EventBus, MessageRef, OrchestratorEvent, ParsedCommand, SessionPhase, TaskId,
     TaskKind, TaskStateSummary,
 };
-use claude_ndjson::CoalescedEvent;
-use tokio::sync::mpsc;
 
 use crate::commands::{build_cost, build_status};
 use crate::config::OrchestratorConfig;
-use crate::persistence::StateStore;
-use crate::task_manager::{QueuedInput, Task, TaskRegistry, TaskState};
+use crate::task_manager::{Task, TaskRegistry, TaskState};
 
 pub struct Orchestrator {
     pub bus: Arc<EventBus>,
     pub registry: Arc<TaskRegistry>,
     pub containers: Arc<ContainerManager>,
-    pub store: Arc<StateStore>,
     pub config: OrchestratorConfig,
 }
 
@@ -29,20 +24,18 @@ impl Orchestrator {
         bus: Arc<EventBus>,
         registry: Arc<TaskRegistry>,
         containers: Arc<ContainerManager>,
-        store: Arc<StateStore>,
         config: OrchestratorConfig,
     ) -> Self {
         Self {
             bus,
             registry,
             containers,
-            store,
             config,
         }
     }
 
     /// Run the main orchestrator loop.
-    pub async fn run(self: Arc<Self>, mut backend_rx: mpsc::Receiver<BackendEvent>) {
+    pub async fn run(self: Arc<Self>, mut backend_rx: tokio::sync::mpsc::Receiver<BackendEvent>) {
         info!("orchestrator: starting main loop");
 
         loop {
@@ -132,30 +125,13 @@ impl Orchestrator {
         text: String,
         msg_ref: Option<MessageRef>,
     ) {
-        // Mark acknowledged.
         self.bus.emit(OrchestratorEvent::PhaseChanged {
             task_id: task_id.clone(),
             phase: SessionPhase::Acknowledged,
             trigger_message: msg_ref.clone(),
         });
 
-        let is_idle = self
-            .registry
-            .with(task_id, |t| t.claude_idle)
-            .unwrap_or(false);
-
-        if is_idle {
-            // Send directly.
-            self.send_to_container(task_id, text, msg_ref).await;
-        } else {
-            // Queue it.
-            self.registry.with_mut(task_id, |t| {
-                t.stdin_queue.push_back(QueuedInput {
-                    text,
-                    message_ref: msg_ref,
-                });
-            });
-        }
+        self.send_to_container(task_id, text, msg_ref).await;
     }
 
     async fn send_to_container(
@@ -259,13 +235,12 @@ impl Orchestrator {
     }
 
     pub async fn hibernate_task(&self, task_id: &TaskId) {
-        // Take the task out of the registry, hibernate, put back.
         if let Some(mut task) = self.registry.remove(task_id) {
             if let TaskState::Running(handle_mutex) = task.state {
                 let handle = handle_mutex.into_inner().unwrap_or_else(|e| e.into_inner());
                 match self.containers.hibernate(handle).await {
-                    Ok(session_data) => {
-                        task.state = TaskState::Hibernated(session_data);
+                    Ok(_session_data) => {
+                        task.state = TaskState::Hibernated;
                         let id = task.id.clone();
                         self.bus.emit(OrchestratorEvent::TaskStateChanged {
                             task_id: id.clone(),
@@ -276,11 +251,7 @@ impl Orchestrator {
                     }
                     Err(e) => {
                         error!("failed to hibernate {task_id}: {e}");
-                        task.state = TaskState::Dead(claude_containers::SessionData::new(
-                            String::new(),
-                            String::new(),
-                            ContainerConfig::default(),
-                        ));
+                        task.state = TaskState::Dead;
                         self.registry.insert(task);
                     }
                 }
@@ -320,7 +291,7 @@ impl Orchestrator {
                     task_id.clone(),
                     name.clone(),
                     profile.clone(),
-                    TaskState::Running(std::sync::Mutex::new(handle)),
+                    TaskState::Running(Box::new(std::sync::Mutex::new(handle))),
                     kind.clone(),
                 );
                 self.registry.insert(task);
@@ -344,13 +315,214 @@ impl Orchestrator {
             }
         }
     }
+}
 
-    #[allow(dead_code)]
-    async fn handle_claude_event(
-        &self,
-        _task_id: &TaskId,
-        _event: Result<Option<CoalescedEvent>>,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use claude_containers::AuthManager;
+    use claude_events::{BackendSource, MessageRef};
+    use tokio::sync::broadcast;
+    use tokio::time::{timeout, Duration};
+
+    use claude_events::TaskKind;
+
+    use crate::task_manager::{Task, TaskState};
+
+    // ── helpers ─────────────────────────────────────────────────────────────
+
+    fn make_orchestrator() -> (
+        Arc<Orchestrator>,
+        tokio::sync::mpsc::Sender<BackendEvent>,
+        broadcast::Receiver<OrchestratorEvent>,
+        Arc<TaskRegistry>,
     ) {
-        // Placeholder — real implementation polls the CoalescedStream
+        let mut bus = EventBus::new();
+        let backend_rx = bus.take_backend_receiver();
+        let backend_tx = bus.backend_sender();
+        let orch_rx = bus.subscribe_orchestrator();
+        let bus = Arc::new(bus);
+        let registry = Arc::new(TaskRegistry::new());
+        // bollard::Docker::connect_with_socket_defaults() doesn't open a connection
+        // until the first request, so this succeeds even when Docker isn't running.
+        let containers = Arc::new(
+            ContainerManager::new(
+                "unix:///var/run/docker.sock",
+                AuthManager::new("/tmp/test-auth".into()),
+                "/tmp".into(),
+            )
+            .unwrap(),
+        );
+        let orch = Arc::new(Orchestrator::new(
+            Arc::clone(&bus),
+            Arc::clone(&registry),
+            containers,
+            OrchestratorConfig::default(),
+        ));
+        let orch_clone = Arc::clone(&orch);
+        tokio::spawn(async move { orch_clone.run(backend_rx).await });
+        (orch, backend_tx, orch_rx, registry)
+    }
+
+    fn make_task(name: &str) -> Task {
+        Task::new(
+            TaskId(format!("id-{name}")),
+            name.to_string(),
+            "test-profile".to_string(),
+            TaskState::Hibernated,
+            TaskKind::Job,
+        )
+    }
+
+    fn msg_ref() -> MessageRef {
+        MessageRef::new("test-backend", "msg-1")
+    }
+
+    fn source() -> BackendSource {
+        BackendSource::new("test-backend", "user-1")
+    }
+
+    /// Collect up to `count` orchestrator events, waiting at most `ms` milliseconds total.
+    async fn collect(
+        rx: &mut broadcast::Receiver<OrchestratorEvent>,
+        count: usize,
+        ms: u64,
+    ) -> Vec<OrchestratorEvent> {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(ms);
+        let mut events = Vec::new();
+        while events.len() < count {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match timeout(remaining, rx.recv()).await {
+                Ok(Ok(e)) => events.push(e),
+                _ => break,
+            }
+        }
+        events
+    }
+
+    // ── tests ────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn status_no_tasks() {
+        let (_orch, tx, mut rx, _reg) = make_orchestrator();
+
+        tx.send(BackendEvent::Command {
+            command: ParsedCommand::Status,
+            task_id: None,
+            message_ref: msg_ref(),
+            source: source(),
+        })
+        .await
+        .unwrap();
+
+        let events = collect(&mut rx, 1, 500).await;
+        assert_eq!(events.len(), 1);
+        let OrchestratorEvent::CommandResponse { text, .. } = &events[0] else {
+            panic!("expected CommandResponse");
+        };
+        assert_eq!(text, "No active tasks.");
+    }
+
+    #[tokio::test]
+    async fn status_with_task_shows_name() {
+        let (_orch, tx, mut rx, registry) = make_orchestrator();
+        registry.insert(make_task("my-task"));
+
+        tx.send(BackendEvent::Command {
+            command: ParsedCommand::Status,
+            task_id: None,
+            message_ref: msg_ref(),
+            source: source(),
+        })
+        .await
+        .unwrap();
+
+        let events = collect(&mut rx, 1, 500).await;
+        let OrchestratorEvent::CommandResponse { text, .. } = &events[0] else {
+            panic!("expected CommandResponse");
+        };
+        assert!(text.contains("my-task"), "status text was: {text}");
+    }
+
+    #[tokio::test]
+    async fn user_message_emits_acknowledged_then_responding() {
+        let (_orch, tx, mut rx, registry) = make_orchestrator();
+        let task_id = TaskId("id-mytask".to_string());
+        registry.insert(make_task("mytask"));
+
+        tx.send(BackendEvent::UserMessage {
+            task_id,
+            text: "hello claude".to_string(),
+            message_ref: msg_ref(),
+            source: source(),
+        })
+        .await
+        .unwrap();
+
+        let events = collect(&mut rx, 2, 500).await;
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            OrchestratorEvent::PhaseChanged { phase: SessionPhase::Acknowledged, .. }
+        ));
+        assert!(matches!(
+            &events[1],
+            OrchestratorEvent::PhaseChanged { phase: SessionPhase::Responding, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn stop_removes_task_and_emits_state_change() {
+        let (_orch, tx, mut rx, registry) = make_orchestrator();
+        let task_id = TaskId("id-stoptask".to_string());
+        registry.insert(make_task("stoptask"));
+
+        tx.send(BackendEvent::Command {
+            command: ParsedCommand::Stop {
+                task_id: Some(task_id.clone()),
+            },
+            task_id: None,
+            message_ref: msg_ref(),
+            source: source(),
+        })
+        .await
+        .unwrap();
+
+        let events = collect(&mut rx, 1, 500).await;
+        assert!(matches!(
+            &events[0],
+            OrchestratorEvent::TaskStateChanged {
+                new_state: TaskStateSummary::Dead,
+                ..
+            }
+        ));
+        assert!(registry.with(&task_id, |_| ()).is_none(), "task should be removed");
+    }
+
+    #[tokio::test]
+    async fn config_command_updates_show_thinking() {
+        let (_orch, tx, mut rx, registry) = make_orchestrator();
+        let task_id = TaskId("id-cfg".to_string());
+        registry.insert(make_task("cfg"));
+
+        tx.send(BackendEvent::Command {
+            command: ParsedCommand::Config {
+                key: "thinking".to_string(),
+                value: "on".to_string(),
+            },
+            task_id: Some(task_id.clone()),
+            message_ref: msg_ref(),
+            source: source(),
+        })
+        .await
+        .unwrap();
+
+        collect(&mut rx, 1, 500).await; // drain CommandResponse
+
+        let show_thinking = registry.with(&task_id, |t| t.config.show_thinking).unwrap();
+        assert!(show_thinking);
     }
 }

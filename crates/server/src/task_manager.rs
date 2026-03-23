@@ -1,11 +1,10 @@
-use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 
-use claude_containers::{ContainerHandle, SessionData};
-use claude_events::{MessageRef, TaskId, TaskKind, TaskStateSummary, TaskSummary};
+use claude_containers::ContainerHandle;
+use claude_events::{TaskId, TaskKind, TaskStateSummary};
 use claude_ndjson::UsageStats;
 
 // ── TaskState ─────────────────────────────────────────────────────────────────
@@ -13,17 +12,17 @@ use claude_ndjson::UsageStats;
 /// `ContainerHandle` contains `NdjsonTransport` which holds `Box<dyn AsyncRead/Write + Send>`
 /// — these are `Send` but not `Sync`. We wrap in `Mutex` so `TaskState: Send + Sync`.
 pub enum TaskState {
-    Running(Mutex<ContainerHandle>),
-    Hibernated(SessionData),
-    Dead(SessionData),
+    Running(Box<Mutex<ContainerHandle>>),
+    Hibernated,
+    Dead,
 }
 
 impl TaskState {
     pub fn summary(&self) -> TaskStateSummary {
         match self {
             TaskState::Running(_) => TaskStateSummary::Running,
-            TaskState::Hibernated(_) => TaskStateSummary::Hibernated,
-            TaskState::Dead(_) => TaskStateSummary::Dead,
+            TaskState::Hibernated => TaskStateSummary::Hibernated,
+            TaskState::Dead => TaskStateSummary::Dead,
         }
     }
 }
@@ -35,13 +34,6 @@ pub struct TaskConfig {
     pub show_thinking: bool,
 }
 
-// ── QueuedInput ───────────────────────────────────────────────────────────────
-
-pub struct QueuedInput {
-    pub text: String,
-    pub message_ref: Option<MessageRef>,
-}
-
 // ── Task ──────────────────────────────────────────────────────────────────────
 
 pub struct Task {
@@ -50,16 +42,12 @@ pub struct Task {
     pub profile: String,
     pub state: TaskState,
     pub usage: UsageStats,
-    pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
-    pub stdin_queue: VecDeque<QueuedInput>,
     pub kind: TaskKind,
     pub config: TaskConfig,
     /// True when Claude is not currently processing a turn.
     pub claude_idle: bool,
-    pub current_trigger: Option<MessageRef>,
-    /// Mapping of backend_name → channel/topic identifier.
-    pub backend_channels: HashMap<String, String>,
+    pub current_trigger: Option<claude_events::MessageRef>,
 }
 
 impl Task {
@@ -70,31 +58,17 @@ impl Task {
         state: TaskState,
         kind: TaskKind,
     ) -> Self {
-        let now = Utc::now();
         Self {
             id,
             name,
             profile,
             state,
             usage: UsageStats::default(),
-            created_at: now,
-            last_activity: now,
-            stdin_queue: VecDeque::new(),
+            last_activity: Utc::now(),
             kind,
             config: TaskConfig::default(),
             claude_idle: true,
             current_trigger: None,
-            backend_channels: HashMap::new(),
-        }
-    }
-
-    pub fn summary(&self) -> TaskSummary {
-        TaskSummary {
-            id: self.id.clone(),
-            name: self.name.clone(),
-            profile: self.profile.clone(),
-            state: self.state.summary(),
-            kind: self.kind.clone(),
         }
     }
 }
@@ -137,62 +111,66 @@ impl TaskRegistry {
     pub fn all_ids(&self) -> Vec<TaskId> {
         self.tasks.iter().map(|r| r.key().clone()).collect()
     }
-
-    pub fn all_summaries(&self) -> Vec<TaskSummary> {
-        self.tasks.iter().map(|r| r.summary()).collect()
-    }
-
-    /// Fuzzy-match a hint string against task names. Returns the matching task
-    /// ID if exactly one task matches, or an error if ambiguous/not found.
-    pub fn resolve_hint(&self, hint: &str) -> anyhow::Result<TaskId> {
-        let lower = hint.to_lowercase();
-        let matches: Vec<TaskId> = self
-            .tasks
-            .iter()
-            .filter(|r| r.name.to_lowercase().contains(&lower))
-            .map(|r| r.key().clone())
-            .collect();
-
-        match matches.len() {
-            0 => anyhow::bail!("no task matching '{hint}'"),
-            1 => Ok(matches.into_iter().next().unwrap()),
-            _ => anyhow::bail!("ambiguous task hint '{hint}' — be more specific"),
-        }
-    }
-
-    /// Drain the stdin queue for a task and concatenate all messages.
-    /// Returns `None` if the queue is empty.
-    pub fn drain_queue(&self, id: &TaskId) -> Option<(String, Vec<MessageRef>)> {
-        let mut combined = String::new();
-        let mut refs = Vec::new();
-
-        if let Some(mut task) = self.tasks.get_mut(id) {
-            if task.stdin_queue.is_empty() {
-                return None;
-            }
-            let mut first = true;
-            while let Some(item) = task.stdin_queue.pop_front() {
-                if !first {
-                    combined.push_str("\n---\n");
-                }
-                combined.push_str(&item.text);
-                if let Some(r) = item.message_ref {
-                    refs.push(r);
-                }
-                first = false;
-            }
-        }
-
-        if combined.is_empty() {
-            None
-        } else {
-            Some((combined, refs))
-        }
-    }
 }
 
 impl Default for TaskRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use claude_events::TaskId;
+
+    fn make_task(name: &str) -> Task {
+        Task::new(
+            TaskId(format!("id-{name}")),
+            name.to_string(),
+            "test".to_string(),
+            TaskState::Hibernated,
+            TaskKind::Job,
+        )
+    }
+
+    #[test]
+    fn insert_and_retrieve() {
+        let reg = TaskRegistry::new();
+        let id = TaskId("id-foo".to_string());
+        reg.insert(make_task("foo"));
+        let name = reg.with(&id, |t| t.name.clone()).unwrap();
+        assert_eq!(name, "foo");
+    }
+
+    #[test]
+    fn remove_returns_task() {
+        let reg = TaskRegistry::new();
+        let id = TaskId("id-bar".to_string());
+        reg.insert(make_task("bar"));
+        let task = reg.remove(&id).unwrap();
+        assert_eq!(task.name, "bar");
+        assert!(reg.with(&id, |_| ()).is_none());
+    }
+
+    #[test]
+    fn all_ids_empty_then_populated() {
+        let reg = TaskRegistry::new();
+        assert!(reg.all_ids().is_empty());
+        reg.insert(make_task("a"));
+        reg.insert(make_task("b"));
+        let mut ids: Vec<String> = reg.all_ids().into_iter().map(|id| id.0).collect();
+        ids.sort();
+        assert_eq!(ids, ["id-a", "id-b"]);
+    }
+
+    #[test]
+    fn with_mut_updates_field() {
+        let reg = TaskRegistry::new();
+        let id = TaskId("id-c".to_string());
+        reg.insert(make_task("c"));
+        reg.with_mut(&id, |t| t.claude_idle = false);
+        let idle = reg.with(&id, |t| t.claude_idle).unwrap();
+        assert!(!idle);
     }
 }

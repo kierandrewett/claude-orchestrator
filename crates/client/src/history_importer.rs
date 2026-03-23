@@ -139,7 +139,7 @@ fn collect_jsonl_inner(dir: &Path, out: &mut Vec<PathBuf>) {
         let path = entry.path();
         if path.is_dir() {
             collect_jsonl_inner(&path, out);
-        } else if path.extension().map_or(false, |e| e == "jsonl") {
+        } else if path.extension().is_some_and(|e| e == "jsonl") {
             out.push(path);
         }
     }
@@ -182,11 +182,10 @@ fn parse_jsonl(path: &Path, projects_base: &Path) -> Option<HistoricalSession> {
 
         // Collect only user and assistant turns — the formats EventStream renders.
         let event_type = val.get("type").and_then(|t| t.as_str());
-        if matches!(event_type, Some("user") | Some("assistant")) {
-            if events.len() < MAX_EVENTS_PER_SESSION {
+        if matches!(event_type, Some("user") | Some("assistant"))
+            && events.len() < MAX_EVENTS_PER_SESSION {
                 events.push(val);
             }
-        }
     }
 
     if events.is_empty() {

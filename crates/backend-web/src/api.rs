@@ -5,12 +5,12 @@ use axum::{
     routing::{delete, get, post},
     Router,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc};
 
 use claude_events::{
-    BackendEvent, BackendSource, EventBus, MessageRef, OrchestratorEvent, ParsedCommand, TaskId,
+    BackendEvent, BackendSource, MessageRef, OrchestratorEvent, ParsedCommand, TaskId,
 };
 
 /// Shared app state passed to all route handlers.

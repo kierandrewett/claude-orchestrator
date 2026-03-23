@@ -32,7 +32,7 @@ impl OrchestratorLlm {
 
         let event_descriptions = events
             .iter()
-            .map(|e| describe_event(e))
+            .map(describe_event)
             .collect::<Vec<_>>()
             .join("\n");
 

@@ -31,3 +31,6 @@ dashmap                = "6"
 clap                   = { version = "4", features = ["derive"] }
 dirs                   = "5"
 thiserror              = "2"
+
+[dev-dependencies]
+tempfile = "3"

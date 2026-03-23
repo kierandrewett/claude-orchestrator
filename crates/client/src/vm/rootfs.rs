@@ -7,7 +7,7 @@
 //!   - First run  → `claude --session-id $CLAUDE_SESSION_ID`
 //!   - Restart    → `claude --resume    $CLAUDE_SESSION_ID`
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use tokio::process::Command;
@@ -18,16 +18,6 @@ const ALWAYS_PACKAGES: &[&str] = &["git", "curl", "ca-certificates", "bash"];
 // ---------------------------------------------------------------------------
 // Public helpers
 // ---------------------------------------------------------------------------
-
-pub fn check_docker() -> Result<()> {
-    which::which("docker").context("docker not found in PATH")?;
-    Ok(())
-}
-
-/// Returns `~/.config/claude-client/Dockerfile`.
-pub fn dockerfile_path() -> PathBuf {
-    crate::vm::config::VmConfig::dockerfile_path()
-}
 
 /// Write `Dockerfile` and `entrypoint.sh` to the config dir.
 pub async fn write_dockerfile(

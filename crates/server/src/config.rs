@@ -144,15 +144,4 @@ impl OrchestratorConfig {
         }
     }
 
-    /// Resolve an "env:VAR_NAME" string or return the string as-is.
-    pub fn resolve_env(s: &str) -> String {
-        if let Some(var) = s.strip_prefix("env:") {
-            std::env::var(var).unwrap_or_else(|_| {
-                tracing::warn!("env var {var} not set");
-                String::new()
-            })
-        } else {
-            s.to_string()
-        }
-    }
 }

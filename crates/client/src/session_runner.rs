@@ -10,7 +10,6 @@ pub struct SessionConfig {
     pub session_id: String,
     pub initial_prompt: Option<String>,
     pub extra_args: Vec<String>,
-    pub claude_path: String,
     pub claude_session_id: String, // pre-generated UUID for --session-id or --resume
     pub is_resume: bool,           // true = use --resume, false = use --session-id
     pub default_cwd: String,       // working directory for spawning claude

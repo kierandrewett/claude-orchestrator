@@ -1,15 +1,13 @@
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use bollard::container::{
     AttachContainerOptions, Config, CreateContainerOptions, RemoveContainerOptions,
     StartContainerOptions, StopContainerOptions,
 };
 use bollard::models::{HostConfig, Mount, MountTypeEnum};
 use claude_ndjson::{NdjsonTransport, UserInput};
-use futures_util::StreamExt;
-use tokio::io::AsyncWriteExt;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::auth::AuthManager;
 use crate::config::{new_session_id, ContainerConfig, NetworkMode, SessionData};

@@ -26,7 +26,7 @@ pub async fn handle_ws_client(
     // Writer task: pull from local_rx → ws_tx.
     let writer = tokio::spawn(async move {
         while let Some(text) = local_rx.recv().await {
-            if ws_tx.send(Message::Text(text.into())).await.is_err() {
+            if ws_tx.send(Message::Text(text)).await.is_err() {
                 break;
             }
         }

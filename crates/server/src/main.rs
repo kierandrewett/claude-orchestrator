@@ -150,7 +150,6 @@ async fn run(config_path: PathBuf) -> Result<()> {
         Arc::clone(&bus),
         Arc::clone(&registry),
         Arc::clone(&containers),
-        Arc::clone(&store),
         config,
     ));
 

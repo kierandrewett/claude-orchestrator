@@ -85,7 +85,7 @@ impl Tray {
         } else {
             "Disconnected".to_string()
         };
-        let _ = self.state_item.set_text(&status);
+        self.state_item.set_text(&status);
 
         // Sessions line
         let sessions_text = match state.active_sessions {
@@ -93,7 +93,7 @@ impl Tray {
             1 => "1 active session".to_string(),
             n => format!("{n} active sessions"),
         };
-        let _ = self.sessions_item.set_text(&sessions_text);
+        self.sessions_item.set_text(&sessions_text);
 
         // Update icon when count or connection state changes
         if state.active_sessions != self.last_count || state.connected != self.last_connected {
@@ -134,7 +134,7 @@ fn make_icon(count: usize, connected: bool) -> Icon {
 }
 
 /// Desaturate all pixels to greyscale (luminance-weighted).
-fn greyscale(pixels: &mut Vec<u8>) {
+fn greyscale(pixels: &mut [u8]) {
     for chunk in pixels.chunks_exact_mut(4) {
         let r = chunk[0] as f32;
         let g = chunk[1] as f32;
@@ -148,7 +148,7 @@ fn greyscale(pixels: &mut Vec<u8>) {
 }
 
 /// Draw a red pill badge with a digit (or "+") in the bottom-right corner.
-fn draw_badge(pixels: &mut Vec<u8>, w: u32, h: u32, count: usize) {
+fn draw_badge(pixels: &mut [u8], w: u32, h: u32, count: usize) {
     let label: &[u8] = match count {
         1 => b"1",
         2 => b"2",

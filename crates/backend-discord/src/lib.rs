@@ -7,15 +7,11 @@ use claude_events::{BackendEvent, OrchestratorEvent};
 use tokio::sync::{broadcast, mpsc};
 use tracing::info;
 
-pub struct DiscordBackend {
-    bot_token: String,
-}
+pub struct DiscordBackend;
 
 impl DiscordBackend {
-    pub fn new(bot_token: impl Into<String>) -> Self {
-        Self {
-            bot_token: bot_token.into(),
-        }
+    pub fn new(_bot_token: impl Into<String>) -> Self {
+        Self
     }
 }
 
