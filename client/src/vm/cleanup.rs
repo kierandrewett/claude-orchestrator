@@ -1,38 +1,49 @@
 //! Background container cleanup task.
 //!
-//! Runs every 60 seconds and removes managed Docker containers that no longer
-//! have an active Claude process:
+//! With the new design, Claude IS the main container process:
 //!
-//!   * **Running** containers where `docker top` shows no `claude` process are
-//!     stopped and removed — the session has ended but the `sleep infinity`
-//!     sentinel is still running.
+//!   * **Running** containers → Claude is actively working; never touched.
+//!   * **Stopped / exited** containers → Claude finished or crashed; removed
+//!     after a 1-hour grace period (so a session can be resumed within an hour
+//!     of the previous run ending).
 //!
-//!   * **Stopped / exited** containers are removed immediately — they either
-//!     crashed or were left behind by a previous client run.
-//!
-//! Containers where `claude` is actively running are never touched.
+//! On client startup: stop (not remove) any running managed containers so
+//! the client doesn't fight over their I/O.  Stopped containers are left
+//! alone — they can be resumed normally when the session is accessed again.
+
+use std::time::{Duration, SystemTime};
 
 use tokio::process::Command;
 use tracing::{info, warn};
 
-const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+/// How long a stopped container is kept before being removed.
+const STOPPED_GRACE: Duration = Duration::from_secs(3600);
 
-/// Called once at startup: removes every managed container unconditionally.
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// Called once at startup.
 ///
-/// After a client restart the session map is empty, so any container left
-/// over from the previous run is orphaned — there is no live session that
-/// could be using it.
+/// Stops any running managed containers (their I/O is no longer connected to
+/// anything) but leaves stopped/exited containers in place — they can still
+/// be resumed when the session is next requested.
 pub async fn startup_sweep() {
-    let names = match list_containers(&[]).await {
+    let running = match list_containers(&["status=running"]).await {
         Some(v) => v,
         None => return,
     };
-    if names.is_empty() {
+    if running.is_empty() {
         return;
     }
-    info!("cleanup: startup sweep removing {} orphaned container(s)", names.len());
-    for name in names {
-        remove_container(&name).await;
+    info!(
+        "cleanup: startup sweep stopping {} running container(s)",
+        running.len()
+    );
+    for name in running {
+        info!("cleanup: stopping orphaned running container {name}");
+        let _ = Command::new("docker").args(["stop", &name]).status().await;
     }
 }
 
@@ -40,63 +51,104 @@ pub async fn startup_sweep() {
 pub async fn run() {
     loop {
         tokio::time::sleep(SWEEP_INTERVAL).await;
-        sweep().await;
+        sweep_stopped_expired().await;
     }
 }
 
-async fn sweep() {
-    sweep_running_idle().await;
-    sweep_stopped().await;
-}
-
 // ---------------------------------------------------------------------------
-// Sweep: running containers with no active claude process
+// Sweep: stopped containers past the grace period
 // ---------------------------------------------------------------------------
 
-async fn sweep_running_idle() {
-    let names = match list_containers(&["status=running"]).await {
-        Some(v) => v,
-        None => return,
-    };
-
-    for name in names {
-        if claude_running_in(&name).await {
-            // Claude is actively working — leave it alone.
-            continue;
-        }
-        info!("cleanup: container {name} has no active claude process — removing");
-        remove_container(&name).await;
-    }
-}
-
-/// Returns `true` if a process whose command contains "claude" is running
-/// inside the container.
-async fn claude_running_in(name: &str) -> bool {
-    let out = match Command::new("docker")
-        .args(["top", name])
-        .output()
-        .await
-    {
-        Ok(o) => o,
-        Err(_) => return false,
-    };
-    String::from_utf8_lossy(&out.stdout).contains("claude")
-}
-
-// ---------------------------------------------------------------------------
-// Sweep: stopped / exited containers
-// ---------------------------------------------------------------------------
-
-async fn sweep_stopped() {
+async fn sweep_stopped_expired() {
     let names = match list_containers(&["status=exited", "status=dead"]).await {
         Some(v) => v,
         None => return,
     };
 
     for name in names {
-        info!("cleanup: removing stopped container {name}");
-        remove_container(&name).await;
+        match finished_at(&name).await {
+            Some(finished) => {
+                let age = SystemTime::now()
+                    .duration_since(finished)
+                    .unwrap_or(Duration::ZERO);
+                if age >= STOPPED_GRACE {
+                    info!(
+                        "cleanup: container {name} stopped {:.0}m ago — removing",
+                        age.as_secs_f64() / 60.0
+                    );
+                    remove_container(&name).await;
+                }
+            }
+            None => {
+                // Can't determine finish time — remove it to be safe.
+                warn!("cleanup: container {name} has unknown finish time — removing");
+                remove_container(&name).await;
+            }
+        }
     }
+}
+
+/// Returns the time the container finished, parsed from `docker inspect`.
+async fn finished_at(name: &str) -> Option<SystemTime> {
+    let out = Command::new("docker")
+        .args(["inspect", "--format", "{{.State.FinishedAt}}", name])
+        .output()
+        .await
+        .ok()?;
+
+    if !out.status.success() {
+        return None;
+    }
+
+    // Docker returns RFC 3339, e.g. "2024-01-15T10:30:00.123456789Z"
+    let s = String::from_utf8_lossy(&out.stdout);
+    let s = s.trim();
+
+    // Zero time means "never finished" (shouldn't happen for exited containers,
+    // but guard against it).
+    if s.starts_with("0001-01-01") {
+        return None;
+    }
+
+    // Parse with chrono if available, otherwise fall back to a simple heuristic.
+    parse_rfc3339(s)
+}
+
+fn parse_rfc3339(s: &str) -> Option<SystemTime> {
+    // Parse manually: "2024-01-15T10:30:00.123456789Z"
+    // We only need second-level precision.
+    let s = s.trim_end_matches('Z');
+    let s = s.split('.').next().unwrap_or(s); // drop sub-seconds
+    // Format: YYYY-MM-DDTHH:MM:SS
+    let parts: Vec<&str> = s.split('T').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let date_parts: Vec<u32> = parts[0].split('-').filter_map(|p| p.parse().ok()).collect();
+    let time_parts: Vec<u32> = parts[1].split(':').filter_map(|p| p.parse().ok()).collect();
+    if date_parts.len() != 3 || time_parts.len() != 3 {
+        return None;
+    }
+    let (year, month, day) = (date_parts[0] as i32, date_parts[1], date_parts[2]);
+    let (hour, min, sec) = (time_parts[0], time_parts[1], time_parts[2]);
+
+    // Convert to Unix timestamp via days since epoch.
+    let days = days_since_epoch(year, month, day)?;
+    let secs = days as u64 * 86400 + hour as u64 * 3600 + min as u64 * 60 + sec as u64;
+    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+}
+
+fn days_since_epoch(year: i32, month: u32, day: u32) -> Option<i64> {
+    // Compute days since 1970-01-01 using the proleptic Gregorian calendar.
+    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
+    let y = if month <= 2 { year - 1 } else { year } as i64;
+    let m = month as i64;
+    let d = day as i64;
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146097 + doe - 719468)
 }
 
 // ---------------------------------------------------------------------------

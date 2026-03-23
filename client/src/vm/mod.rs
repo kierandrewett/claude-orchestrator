@@ -1,19 +1,18 @@
 //! Docker container session runner.
 //!
-//! Each session runs inside a named Docker container:
+//! Each Claude session runs inside a named, persistent Docker container:
 //!
 //!   claude-<claude_session_id>
 //!
-//! The container is created once with `docker run -d sleep infinity` and then
-//! `docker exec -i` is used each time to run Claude inside it.  This means:
+//! The container's main process IS Claude (via the baked-in entrypoint script).
+//! The entrypoint handles first-run vs resume automatically using a flag file:
 //!
-//!   * Container filesystem state persists across session resumes.
-//!   * The same container is reused when a session is resumed (same
-//!     `claude_session_id`).
-//!   * The `sleep infinity` sentinel keeps the container alive between execs.
+//!   * New container  → `docker run -i` → entrypoint runs `claude --session-id`
+//!   * Stopped        → `docker start -a -i` → entrypoint runs `claude --resume`
 //!
-//! A background cleanup task (see `cleanup`) removes containers that no longer
-//! have an active Claude process.
+//! stdin/stdout are piped directly through the container's I/O streams.
+//! The container is NOT removed on exit (`--rm` is absent), so state persists
+//! and a stopped container can be restarted to resume the session.
 
 pub mod cleanup;
 pub mod config;
@@ -81,45 +80,41 @@ async fn do_run(
     let session_id = &config.session_id;
     let name = container_name(&config.claude_session_id);
 
-    // Ensure the container exists and is running.
-    ensure_container(&name, config, vm_cfg).await?;
-
-    // docker exec -i <container> claude --print ...
-    let mut cmd = Command::new("docker");
-    cmd.args(["exec", "-i", "-u", &host_uid_gid()]);
-
-    // Working directory for this exec (may differ from container default).
-    cmd.args(["-w", &config.default_cwd]);
-
-    // Pass the current API key through to the exec'd process.
-    cmd.args(["-e", "ANTHROPIC_API_KEY"]);
-
-    cmd.arg(&name);
-
-    cmd.args([
-        "claude",
-        "--print",
-        "--input-format", "stream-json",
-        "--output-format", "stream-json",
-        "--dangerously-skip-permissions",
-    ]);
-
-    if config.is_resume {
-        cmd.args(["--resume", &config.claude_session_id]);
-    } else {
-        cmd.args(["--session-id", &config.claude_session_id]);
-    }
-
-    for arg in &config.extra_args {
-        cmd.arg(arg);
-    }
+    // Build the docker command depending on whether the container already exists.
+    let mut cmd = match container_state(&name).await.as_deref() {
+        Some("running") => {
+            // Already running — another client instance may be using it.
+            // Attach so we can relay I/O.
+            info!("docker: attaching to already-running container {name}");
+            let mut c = Command::new("docker");
+            c.args(["attach", "--no-stdin=false", &name]);
+            c
+        }
+        Some("exited" | "stopped" | "created" | "paused") => {
+            // Stopped container exists — restart it; entrypoint will --resume.
+            info!("docker: restarting stopped container {name}");
+            let mut c = Command::new("docker");
+            c.args(["start", "-a", "-i", &name]);
+            c
+        }
+        Some(other) => {
+            // Unexpected state — remove it and fall through to create a new one.
+            warn!("docker: container {name} is in state '{other}', removing before recreate");
+            let _ = Command::new("docker").args(["rm", "-f", &name]).status().await;
+            new_container_cmd(config, vm_cfg, &name)?
+        }
+        None => {
+            // No container yet — create a fresh one.
+            new_container_cmd(config, vm_cfg, &name)?
+        }
+    };
 
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    let mut child = cmd.spawn().context("spawn docker exec")?;
+    let mut child = cmd.spawn().context("spawn docker")?;
     let mut stdin = child.stdin.take().expect("stdin piped");
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
@@ -131,7 +126,7 @@ async fn do_run(
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                warn!("docker exec stderr: {line}");
+                warn!("docker stderr: {line}");
                 let mut b = buf.lock().await;
                 b.push_str(&line);
                 b.push('\n');
@@ -158,7 +153,7 @@ async fn do_run(
     )
     .await;
 
-    info!("docker: exec claude in container {name}");
+    info!("docker: container {name} running");
 
     let mut stats = SessionStats::default();
     let mut stdout_lines = BufReader::new(stdout).lines();
@@ -193,7 +188,8 @@ async fn do_run(
                         }
                     }
                     Some(S2C::KillSession { .. }) => {
-                        info!("docker: KillSession — stopping exec");
+                        info!("docker: KillSession — stopping container {name}");
+                        let _ = Command::new("docker").args(["stop", &name]).status().await;
                         let _ = child.kill().await;
                         break;
                     }
@@ -230,7 +226,8 @@ async fn do_run(
             }
 
             _ = &mut idle_sleep => {
-                warn!("docker: session {session_id} idle for 12h with no stdin — terminating");
+                warn!("docker: session {session_id} idle for 12h with no stdin — stopping container");
+                let _ = Command::new("docker").args(["stop", &name]).status().await;
                 let _ = child.kill().await;
                 break;
             }
@@ -268,7 +265,83 @@ async fn do_run(
 }
 
 // ---------------------------------------------------------------------------
-// Container lifecycle helpers
+// Container creation helpers
+// ---------------------------------------------------------------------------
+
+/// Build the `docker run -i` command for a brand-new container.
+fn new_container_cmd(
+    config: &crate::session_runner::SessionConfig,
+    vm_cfg: &VmConfig,
+    name: &str,
+) -> Result<Command> {
+    // Check the image exists locally.
+    // (Synchronous check is fine here — we're in an async context but this is
+    //  a quick one-shot status check that can block for a moment.)
+    let image_exists = std::process::Command::new("docker")
+        .args(["image", "inspect", "--format", "{{.Id}}", &vm_cfg.image])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !image_exists {
+        anyhow::bail!(
+            "Docker image '{}' not found locally. \
+             Run /vmrebuild from Telegram (or `docker build`) to build it first.",
+            vm_cfg.image
+        );
+    }
+
+    let is_resume = if config.is_resume { "1" } else { "0" };
+
+    let mut cmd = Command::new("docker");
+    cmd.args(["run", "-i", "--name", name]);
+
+    // Networking.
+    if vm_cfg.network_enabled {
+        cmd.args(["--network", "bridge"]);
+    } else {
+        cmd.args(["--network", "none"]);
+    }
+
+    // Bind-mount host directories.
+    for mount in &vm_cfg.mounts {
+        cmd.args(["-v", &format!("{}:{}", mount.host_path, mount.guest_path)]);
+    }
+
+    // Working directory.
+    cmd.args(["-w", &config.default_cwd]);
+
+    // Environment variables for the entrypoint script.
+    cmd.args([
+        "--env", "ANTHROPIC_API_KEY",
+        "--env", &format!("CLAUDE_SESSION_ID={}", config.claude_session_id),
+        "--env", &format!("CLAUDE_IS_RESUME={is_resume}"),
+    ]);
+
+    // Run as the host user so bind-mounted directories have correct permissions
+    // and claude sees a non-root UID (required for --dangerously-skip-permissions).
+    cmd.args(["--user", &host_uid_gid()]);
+
+    // Labels for lifecycle management.
+    cmd.args([
+        "--label", "claude.managed=true",
+        "--label", &format!("claude.session_id={}", config.session_id),
+        "--label", &format!("claude.claude_session_id={}", config.claude_session_id),
+    ]);
+
+    // Image — entrypoint is baked in, no extra command needed.
+    cmd.arg(&vm_cfg.image);
+
+    // Forward any extra args to the entrypoint / claude.
+    for arg in &config.extra_args {
+        cmd.arg(arg);
+    }
+
+    Ok(cmd)
+}
+
+// ---------------------------------------------------------------------------
+// Container state helpers
 // ---------------------------------------------------------------------------
 
 /// Returns the current state of a container ("running", "exited", etc.), or
@@ -285,104 +358,6 @@ async fn container_state(name: &str) -> Option<String> {
     } else {
         None
     }
-}
-
-/// Ensures the named container exists and is in the `running` state.
-///
-/// * If it doesn't exist  → create it with `docker run -d sleep infinity`.
-/// * If it is stopped     → restart it with `docker start`.
-/// * If it is running     → no-op.
-async fn ensure_container(
-    name: &str,
-    config: &crate::session_runner::SessionConfig,
-    vm_cfg: &VmConfig,
-) -> Result<()> {
-    match container_state(name).await.as_deref() {
-        Some("running") => {
-            info!("docker: reusing running container {name}");
-            return Ok(());
-        }
-        Some(state @ ("exited" | "stopped" | "created" | "paused")) => {
-            info!("docker: restarting {state} container {name}");
-            let s = Command::new("docker")
-                .args(["start", name])
-                .status()
-                .await
-                .context("docker start")?;
-            anyhow::ensure!(s.success(), "docker start {name} failed");
-            return Ok(());
-        }
-        Some(other) => {
-            // Unexpected state (dead, removing, …) — remove and recreate.
-            warn!("docker: container {name} is in unexpected state '{other}', removing");
-            let _ = Command::new("docker").args(["rm", "-f", name]).status().await;
-        }
-        None => {
-            // Container does not exist.
-        }
-    }
-
-    // Check the image exists locally before trying to create the container.
-    let image_check = Command::new("docker")
-        .args(["image", "inspect", "--format", "{{.Id}}", &vm_cfg.image])
-        .output()
-        .await
-        .ok();
-    let image_exists = image_check.map(|o| o.status.success()).unwrap_or(false);
-    if !image_exists {
-        anyhow::bail!(
-            "Docker image '{}' not found locally. \
-             Run /vmrebuild from Telegram (or `docker build`) to build it first.",
-            vm_cfg.image
-        );
-    }
-
-    // Create the container. It runs `sleep infinity` so it stays alive between
-    // Claude exec invocations.
-    let mut cmd = Command::new("docker");
-    cmd.args(["run", "-d", "--name", name]);
-
-    // Networking
-    if vm_cfg.network_enabled {
-        cmd.args(["--network", "bridge"]);
-    } else {
-        cmd.args(["--network", "none"]);
-    }
-
-    // Bind-mount host directories.
-    for mount in &vm_cfg.mounts {
-        cmd.args(["-v", &format!("{}:{}", mount.host_path, mount.guest_path)]);
-    }
-
-    // Default working directory.
-    cmd.args(["-w", &config.default_cwd]);
-
-    // Pass the current API key into the container environment.
-    cmd.args(["--env", "ANTHROPIC_API_KEY"]);
-
-    // Run as the host user so bind-mounted directories have correct permissions
-    // and claude sees a non-root UID (required for --dangerously-skip-permissions).
-    cmd.args(["--user", &host_uid_gid()]);
-
-    // Labels for lifecycle management.
-    cmd.args([
-        "--label", "claude.managed=true",
-        "--label", &format!("claude.session_id={}", config.session_id),
-        "--label", &format!("claude.claude_session_id={}", config.claude_session_id),
-    ]);
-
-    // Image + sentinel command.
-    cmd.arg(&vm_cfg.image);
-    cmd.args(["sleep", "infinity"]);
-
-    let status = cmd
-        .status()
-        .await
-        .context("docker run (create container)")?;
-    anyhow::ensure!(status.success(), "docker run failed for container {name}");
-
-    info!("docker: created container {name}");
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
