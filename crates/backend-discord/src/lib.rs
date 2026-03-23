@@ -1,43 +1,12 @@
-//! Discord messaging backend (stub).
+//! Discord messaging backend powered by serenity + poise.
+//!
+//! Each Claude task gets its own public thread inside a configured text
+//! channel. Orchestrator events are rendered and posted to the thread.
+//! Slash commands (/new, /stop, /status, etc.) are registered via poise;
+//! plain text messages in a task thread are forwarded as UserMessage events.
 
-use anyhow::Result;
-use async_trait::async_trait;
-use backend_traits::MessagingBackend;
-use claude_events::{BackendEvent, OrchestratorEvent};
-use tokio::sync::{broadcast, mpsc};
-use tracing::info;
+mod backend;
+mod commands;
+mod formatting;
 
-pub struct DiscordBackend;
-
-impl DiscordBackend {
-    pub fn new(_bot_token: impl Into<String>) -> Self {
-        Self
-    }
-}
-
-#[async_trait]
-impl MessagingBackend for DiscordBackend {
-    fn name(&self) -> &str {
-        "discord"
-    }
-
-    async fn run(
-        &self,
-        mut orchestrator_events: broadcast::Receiver<OrchestratorEvent>,
-        _backend_sender: mpsc::Sender<BackendEvent>,
-    ) -> Result<()> {
-        info!("discord backend: not yet implemented");
-
-        // Drain orchestrator events until the channel closes, then exit.
-        loop {
-            match orchestrator_events.recv().await {
-                Ok(_) => {}
-                Err(broadcast::error::RecvError::Lagged(_)) => {}
-                Err(broadcast::error::RecvError::Closed) => {
-                    info!("discord backend: orchestrator event channel closed, exiting");
-                    return Ok(());
-                }
-            }
-        }
-    }
-}
+pub use backend::{DiscordBackend, DiscordConfig};
