@@ -1,0 +1,4 @@
+FROM orchestrator/claude-code:base
+USER root
+RUN npm install -g yarn pnpm
+USER claude

@@ -1,0 +1,7 @@
+FROM alpine:latest
+RUN apk add --no-cache bash curl git openssh-client ca-certificates nodejs npm
+RUN npm install -g @anthropic-ai/claude-code
+RUN adduser -D claude
+USER claude
+WORKDIR /workspace
+ENTRYPOINT ["claude", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"]

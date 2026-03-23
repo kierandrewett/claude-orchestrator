@@ -1,0 +1,6 @@
+FROM orchestrator/claude-code:base
+USER root
+RUN apk add --no-cache musl-dev
+USER claude
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH="/home/claude/.cargo/bin:${PATH}"

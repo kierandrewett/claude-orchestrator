@@ -1,0 +1,17 @@
+[Unit]
+Description=Claude Code Orchestration Client
+After=network-online.target graphical-session.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/claude-client
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+
+# Load env from file (user creates this)
+EnvironmentFile=-%h/.config/claude-client/env
+
+[Install]
+WantedBy=default.target

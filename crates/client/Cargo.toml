@@ -1,0 +1,40 @@
+[package]
+name = "claude-client"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "claude-client"
+path = "src/main.rs"
+
+[dependencies]
+claude-shared     = { path = "../shared" }
+claude-ndjson     = { path = "../ndjson" }
+tokio             = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+serde             = { version = "1", features = ["derive"] }
+serde_json        = "1"
+uuid              = { version = "1", features = ["v4"] }
+chrono            = { version = "0.4", features = ["serde"] }
+tracing           = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures-util      = "0.3"
+anyhow            = "1"
+url               = "2"
+dirs              = "5"
+hostname          = "0.3"
+open              = "5"
+ctrlc             = "3"
+atty              = "0.2"
+base64            = "0.22"
+toml              = "0.8"
+which             = "6"
+libc              = "0.2"
+tempfile          = "3"
+# tray-icon is used on all platforms; disable the libxdo default feature so we
+# don't need the xdotool C library installed just to link.  The libxdo feature
+# only enables predefined Copy/Cut/Paste menu items, which we don't use.
+tray-icon         = { version = "0.19", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk               = "0.18"

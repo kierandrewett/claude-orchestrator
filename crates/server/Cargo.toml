@@ -1,0 +1,33 @@
+[package]
+name = "claude-server"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "claude-orchestrator"
+path = "src/main.rs"
+
+[dependencies]
+claude-ndjson          = { path = "../ndjson" }
+claude-events          = { path = "../events" }
+claude-containers      = { path = "../containers" }
+claude-orchestrator-llm = { path = "../orchestrator-llm" }
+backend-traits         = { path = "../backend-traits" }
+backend-discord        = { path = "../backend-discord" }
+backend-web            = { path = "../backend-web" }
+backend-stdio          = { path = "../backend-stdio" }
+tokio                  = { version = "1", features = ["full"] }
+serde                  = { version = "1", features = ["derive"] }
+serde_json             = "1"
+uuid                   = { version = "1", features = ["v4", "serde"] }
+chrono                 = { version = "0.4", features = ["serde"] }
+tracing                = "0.1"
+tracing-subscriber     = { version = "0.3", features = ["env-filter"] }
+futures-util           = "0.3"
+anyhow                 = "1"
+async-trait            = "0.1"
+toml                   = "0.8"
+dashmap                = "6"
+clap                   = { version = "4", features = ["derive"] }
+dirs                   = "5"
+thiserror              = "2"

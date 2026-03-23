@@ -1,0 +1,20 @@
+[package]
+name = "backend-telegram"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+claude-events        = { path = "../events" }
+backend-traits       = { path = "../backend-traits" }
+claude-orchestrator-llm = { path = "../orchestrator-llm" }
+tokio                = { version = "1", features = ["full"] }
+serde                = { version = "1", features = ["derive"] }
+serde_json           = "1"
+anyhow               = "1"
+thiserror            = "2"
+tracing              = "0.1"
+teloxide             = { version = "0.13", features = ["macros"] }
+reqwest              = { version = "0.12", features = ["json", "multipart"] }
+async-trait          = "0.1"
+futures-util         = "0.3"
+uuid                 = { version = "1", features = ["v4", "serde"] }

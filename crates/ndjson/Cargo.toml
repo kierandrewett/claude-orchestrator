@@ -1,0 +1,32 @@
+[package]
+name = "claude-ndjson"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio         = { version = "1", features = ["full"] }
+serde         = { version = "1", features = ["derive"] }
+serde_json    = "1"
+anyhow        = "1"
+thiserror     = "2"
+tracing       = "0.1"
+
+[features]
+bollard = ["dep:bollard", "dep:bytes", "dep:futures-util", "dep:tokio-util"]
+
+[dependencies.bollard]
+version = "0.18"
+optional = true
+
+[dependencies.bytes]
+version = "1"
+optional = true
+
+[dependencies.futures-util]
+version = "0.3"
+optional = true
+
+[dependencies.tokio-util]
+version = "0.7"
+features = ["io"]
+optional = true

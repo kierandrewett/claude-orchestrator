@@ -1,141 +1,111 @@
-# Claude Orchestrator
+# Claude Code Orchestrator
 
-Run Claude Code sessions from anywhere. A Rust server + React dashboard hosted on your homelab, with a lightweight daemon on your main PC that spawns and manages Claude instances. Sessions stream in real time, persist across restarts, and resume automatically.
+A Rust system that proxies Claude Code instances running inside Docker containers, managed through messaging platforms. Each task runs in its own isolated environment with customisable tooling, communicating via Claude Code's NDJSON streaming protocol.
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  Browser / Phone                                        │
-│  dashboard  ──── WebSocket ────▶  Server (homelab)      │
-│                                       │                 │
-│                                   WebSocket             │
-│                                       │                 │
-│                                  Client daemon          │
-│                                  (home PC, tray icon)   │
-│                                       │                 │
-│                                  claude --print ...     │
-└─────────────────────────────────────────────────────────┘
-```
+An event-driven core emits and consumes events through a bus, with pluggable backends (Telegram, web, stdio) subscribing independently. Voice input is handled natively by each backend using a shared orchestrator LLM for interpretation.
 
-## Components
+## Quick Start
 
-| Component | Where it runs | What it does |
-|-----------|--------------|--------------|
-| **Server** | Homelab (Docker) | WebSocket broker, session state, ntfy notifications, serves dashboard |
-| **Dashboard** | Browser (served by server) | Real-time session view, streaming output with syntax highlighting, slash command autocomplete, voice input |
-| **Client daemon** | Home PC (systemd) | Spawns Claude processes, streams NDJSON events to server, system tray icon with session badge |
+### Prerequisites
 
-## Homelab setup
+- Docker (socket at `/var/run/docker.sock`)
+- Rust stable toolchain
+- Claude Max subscription
 
-### 1. Configure environment
+### Setup
 
 ```bash
-cp .env.server.example .env
+cargo build --release -p claude-server
+
+# Build images + authenticate (interactive)
+./target/release/claude-orchestrator setup
+
+# Copy and edit config
+cp config/orchestrator.example.toml config/orchestrator.toml
+$EDITOR config/orchestrator.toml
 ```
 
-Edit `.env`:
-
-```env
-CLIENT_TOKEN=your-secret-token        # shared with the client daemon
-NTFY_TOKEN=your-ntfy-token            # optional, for phone notifications
-PUBLIC_URL=http://homelab.local:8080  # used in ntfy click-through links
-```
-
-### 2. Start the server
+### Run
 
 ```bash
-docker compose up -d
+./target/release/claude-orchestrator run --config config/orchestrator.toml
 ```
 
-The dashboard is served at `http://homelab.local:8080`.
+## Architecture Overview
 
-Session data is persisted to a Docker volume (`claude_data`) and survives restarts.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design document.
 
-### 3. Update
-
-```bash
-docker compose pull   # if using a registry
-# or
-docker compose build --no-cache
-docker compose up -d
+```
+┌──────────────┐   OrchestratorEvent (broadcast)   ┌──────────────────┐
+│  Orchestrator │ ─────────────────────────────────▶│    Backends      │
+│  (server)     │                                    │ telegram/web/... │
+│               │ ◀─────────────────────────────────│                  │
+└──────┬────────┘    BackendEvent (mpsc)             └──────────────────┘
+       │ NDJSON (stdin/stdout via bollard)
+       ▼
+┌──────────────┐
+│   Docker     │   one container per task, running Claude Code
+│  Containers  │
+└──────────────┘
 ```
 
-## Client daemon setup (home PC)
+## Configuration Reference
 
-The client daemon runs as a systemd user service, shows a tray icon with a live session count badge, and opens the dashboard when you click it.
+| Section | Key | Default | Description |
+|---------|-----|---------|-------------|
+| `[server]` | `state_dir` | `~/.local/share/claude-orchestrator` | Persisted state |
+| `[docker]` | `socket` | `unix:///var/run/docker.sock` | Docker socket |
+| `[docker]` | `default_profile` | `base` | Default container profile |
+| `[docker]` | `idle_timeout_hours` | `12` | Hours before auto-hibernation |
+| `[auth]` | `credentials_dir` | `~/.local/share/claude-orchestrator/auth` | OAuth credentials |
+| `[orchestrator_llm]` | `enabled` | `true` | Enable LLM for voice interpretation |
+| `[orchestrator_llm]` | `api_key` | — | Use `"env:VAR_NAME"` for env vars |
+| `[backends.telegram]` | `bot_token` | — | From @BotFather |
+| `[backends.telegram]` | `supergroup_id` | — | Forum-topics supergroup |
+| `[display]` | `show_thinking` | `false` | Show Claude's internal thinking |
 
-### 1. Install
+See `config/orchestrator.example.toml` for the full example.
 
-```bash
-cd client
-chmod +x install.sh
-./install.sh
+## Available Commands
+
+| Command | Description |
+|---------|-------------|
+| `/new <profile> <prompt>` | Create a new task |
+| `/stop [task-id]` | Stop the current task |
+| `/status` | List all tasks with state and cost |
+| `/cost [all]` | Show cost for current or all tasks |
+| `/hibernate` | Hibernate the current task |
+| `/profile list` | List available profiles |
+| `/config thinking on\|off` | Toggle thinking display |
+
+## Docker Profiles
+
+| Profile | Includes |
+|---------|----------|
+| `base` | Node.js, npm, Claude Code |
+| `web` | + yarn, pnpm |
+| `rust` | + rustup, cargo |
+| `python` | + python3, pip |
+
+Build all images: `./scripts/build-images.sh`
+
+## Adding a New Messaging Backend
+
+Implement `MessagingBackend` from `crates/backend-traits/`:
+
+```rust
+#[async_trait]
+impl MessagingBackend for MyBackend {
+    fn name(&self) -> &str { "my-backend" }
+
+    async fn run(
+        &self,
+        mut orchestrator_events: broadcast::Receiver<OrchestratorEvent>,
+        backend_sender: mpsc::Sender<BackendEvent>,
+    ) -> anyhow::Result<()> {
+        // Handle OrchestratorEvents, emit BackendEvents.
+    }
+}
 ```
 
-The script:
-- Builds the binary (`cargo build --release -p claude-client`)
-- Installs it to `~/.local/bin/claude-client`
-- Creates `~/.config/claude-client/env` from the template (if not already present)
-- Stops and disables any existing service, then re-enables the updated one
-
-### 2. Configure
-
-Edit `~/.config/claude-client/env`:
-
-```env
-SERVER_URL=ws://homelab.local:8080/ws/client
-CLIENT_TOKEN=your-secret-token        # must match server
-DASHBOARD_URL=http://homelab.local:8080?token=your-dashboard-token
-DEFAULT_CWD=/home/kieran              # default working directory for Claude
-CLAUDE_PATH=claude                    # path to the claude binary
-```
-
-### 3. Start
-
-```bash
-systemctl --user start claude-client
-systemctl --user status claude-client
-```
-
-The tray icon appears in your system tray. It shows the Claude logo with a badge indicating active session count. Right-click for the menu.
-
-## Sessions
-
-Sessions are created from the dashboard. Type your prompt — you can mention a file path or directory and Claude will work there. Sessions persist across server restarts and resume automatically when the client reconnects.
-
-### Slash commands
-
-Type `/` in the input bar to see available Claude slash commands with autocomplete. Commands are discovered live from your installed Claude version.
-
-### Voice input
-
-Click the microphone button in the input bar to dictate. Uses the Web Speech API (Chrome/Edge).
-
-### ntfy notifications
-
-Each session sends a single persistent notification to your phone that updates in place as Claude works through phases (thinking → reading → writing → running). On completion it shows duration, token counts, and cost.
-
-## Environment variables
-
-### Server
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CLIENT_TOKEN` | — | **Required.** Auth token for client daemon connections |
-| `HOST` | `0.0.0.0` | Bind address |
-| `PORT` | `8080` | Bind port |
-| `PUBLIC_URL` | `http://localhost:8080` | Public URL used in ntfy click links |
-| `NTFY_URL` | `https://ntfy.sh/claude` | ntfy endpoint |
-| `NTFY_TOKEN` | — | ntfy Bearer token |
-| `MAX_BUFFER` | `5000` | Max events buffered per session for replay |
-| `DATA_DIR` | `./data` | Session persistence directory |
-
-### Client daemon
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SERVER_URL` | — | **Required.** WebSocket URL of the server (`ws://` or `wss://`) |
-| `CLIENT_TOKEN` | — | **Required.** Must match server `CLIENT_TOKEN` |
-| `DASHBOARD_URL` | `http://localhost:8080` | URL opened when clicking "Open Dashboard" in tray |
-| `DEFAULT_CWD` | `$HOME` | Working directory Claude sessions start in |
-| `CLAUDE_PATH` | `claude` | Path to the `claude` binary |
-| `RUST_LOG` | `info` (tty) / `warn` (daemon) | Log level |
+Backends depend only on `claude-events` + `backend-traits`. Register in `crates/server/src/main.rs`.

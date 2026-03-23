@@ -1,0 +1,46 @@
+[server]
+state_dir = "~/.local/share/claude-orchestrator"
+
+[docker]
+socket = "unix:///var/run/docker.sock"
+default_profile = "base"
+image_prefix = "orchestrator/claude-code"
+idle_timeout_hours = 12
+
+[mounts.default]
+host = "~/dev"
+container = "/workspace"
+read_only = false
+
+[auth]
+credentials_dir = "~/.local/share/claude-orchestrator/auth"
+
+[orchestrator_llm]
+enabled = true
+provider = "openrouter"
+api_key = "env:OPENROUTER_API_KEY"
+model = "meta-llama/llama-3.1-8b-instruct"
+
+[backends.telegram]
+enabled = true
+bot_token = "env:TELEGRAM_BOT_TOKEN"
+supergroup_id = -100123456789
+scratchpad_topic_name = "Scratchpad"
+allowed_users = [123456789]
+voice_stt = "whisper"
+voice_stt_api_key = "env:OPENAI_API_KEY"
+
+[backends.discord]
+enabled = false
+bot_token = "env:DISCORD_BOT_TOKEN"
+guild_id = 123456789
+voice_stt = "whisper"
+voice_tts = "elevenlabs"
+voice_tts_api_key = "env:ELEVENLABS_API_KEY"
+
+[backends.web]
+enabled = true
+
+[display]
+show_thinking = false
+stream_coalesce_ms = 500

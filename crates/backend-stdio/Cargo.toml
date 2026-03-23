@@ -1,0 +1,13 @@
+[package]
+name = "backend-stdio"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+claude-events  = { path = "../events" }
+backend-traits = { path = "../backend-traits" }
+tokio          = { version = "1", features = ["full"] }
+anyhow         = "1"
+thiserror      = "2"
+tracing        = "0.1"
+async-trait    = "0.1"
