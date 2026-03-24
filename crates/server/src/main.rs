@@ -3,6 +3,8 @@ mod client_ws;
 mod commands;
 mod config;
 mod idle_watchdog;
+mod mcp;
+mod mcp_registry;
 mod orchestrator;
 mod persistence;
 mod task_manager;
@@ -16,13 +18,71 @@ use clap::{Parser, Subcommand};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-use claude_events::EventBus;
+use claude_events::{EventBus, OrchestratorEvent};
 
 use client_registry::ClientRegistry;
 use config::OrchestratorConfig;
+use mcp_registry::McpServerRegistry;
 use orchestrator::Orchestrator;
 use persistence::StateStore;
 use task_manager::TaskRegistry;
+
+// ── Session action API ────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct SessionActionRequest {
+    action: String,
+    #[serde(default)]
+    title: Option<String>,
+}
+
+#[derive(Clone)]
+struct SessionApiState {
+    registry: Arc<TaskRegistry>,
+    bus: Arc<EventBus>,
+}
+
+async fn session_action_handler(
+    axum::extract::State(state): axum::extract::State<SessionApiState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    axum::Json(req): axum::Json<SessionActionRequest>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    match req.action.as_str() {
+        "rename_conversation" => {
+            let title = match req.title {
+                Some(t) if !t.is_empty() => t,
+                _ => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        axum::Json(serde_json::json!({"error": "title required"})),
+                    )
+                        .into_response()
+                }
+            };
+            match state.registry.find_by_session_id(&session_id) {
+                Some(task_id) => {
+                    state
+                        .bus
+                        .emit(OrchestratorEvent::ConversationRenamed { task_id, title });
+                    axum::Json(serde_json::json!({"ok": true})).into_response()
+                }
+                None => (
+                    StatusCode::NOT_FOUND,
+                    axum::Json(serde_json::json!({"error": "session not found"})),
+                )
+                    .into_response(),
+            }
+        }
+        _ => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({"error": "unknown action"})),
+        )
+            .into_response(),
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "claude-orchestrator", about = "Claude Code Orchestrator")]
@@ -71,7 +131,9 @@ async fn run(config_path: PathBuf) -> Result<()> {
     let config = OrchestratorConfig::load(&config_path)?;
 
     let state_dir = OrchestratorConfig::expand_path(&config.server.state_dir);
+    std::fs::create_dir_all(&state_dir).ok();
     let store = Arc::new(StateStore::new(&state_dir));
+    let mcp_registry = Arc::new(McpServerRegistry::load(&state_dir));
 
     let mut bus = EventBus::new();
     let backend_rx = bus.take_backend_receiver();
@@ -123,17 +185,6 @@ async fn run(config_path: PathBuf) -> Result<()> {
     if let Some(ref tg_cfg) = config.backends.telegram {
         if tg_cfg.enabled {
             use backend_telegram::backend::TelegramConfig as TgConfig;
-            let llm = {
-                use claude_orchestrator_llm::{OrchestratorLlm, OrchestratorLlmConfig};
-                let llm_cfg = OrchestratorLlmConfig {
-                    enabled: config.orchestrator_llm.enabled,
-                    provider: config.orchestrator_llm.provider.clone(),
-                    api_key: config.orchestrator_llm.api_key.clone(),
-                    model: config.orchestrator_llm.model.clone(),
-                    base_url: None,
-                };
-                std::sync::Arc::new(OrchestratorLlm::new(llm_cfg))
-            };
             let tg_backend = backend_telegram::TelegramBackend::new(TgConfig {
                 bot_token: tg_cfg.bot_token.clone(),
                 supergroup_id: tg_cfg.supergroup_id,
@@ -142,7 +193,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
                 voice_stt_api_key: tg_cfg.voice_stt_api_key.clone(),
                 show_thinking: config.display.show_thinking,
                 state_dir: state_dir.clone(),
-                llm: Some(llm),
+                hidden_tools: tg_cfg.hidden_tools.clone(),
             });
             let orch_rx = bus.subscribe_orchestrator();
             let tx = backend_sender.clone();
@@ -203,7 +254,19 @@ async fn run(config_path: PathBuf) -> Result<()> {
         let b = Arc::clone(&bus);
         let _token = config.server.client_token.clone();
         tokio::spawn(async move {
-            let app = Router::new().route(
+            let session_api_state = SessionApiState {
+                registry: Arc::clone(&task_reg),
+                bus: Arc::clone(&b),
+            };
+
+            let mcp_state = mcp::McpState {
+                registry: Arc::clone(&task_reg),
+                bus: Arc::clone(&b),
+                connections: std::sync::Arc::new(dashmap::DashMap::new()),
+            };
+
+            let app = Router::new()
+            .route(
                 "/ws/client",
                 get({
                     let reg = Arc::clone(&reg);
@@ -220,6 +283,16 @@ async fn run(config_path: PathBuf) -> Result<()> {
                         }
                     }
                 }),
+            )
+            .merge(
+                Router::new()
+                    .route("/api/session/:session_id/action", axum::routing::post(session_action_handler))
+                    .with_state(session_api_state),
+            )
+            .merge(
+                Router::new()
+                    .route("/mcp", get(mcp::mcp_sse_handler).post(mcp::mcp_post_handler))
+                    .with_state(mcp_state),
             );
 
             let listener = match tokio::net::TcpListener::bind(&bind).await {
@@ -256,6 +329,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
         Arc::clone(&client_registry),
         config,
         Arc::clone(&store),
+        Arc::clone(&mcp_registry),
     ));
 
     // Handle Ctrl-C / SIGTERM.

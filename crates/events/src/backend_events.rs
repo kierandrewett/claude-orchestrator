@@ -43,6 +43,15 @@ pub enum BackendEvent {
         source: BackendSource,
     },
 
+    /// Backend-specific capability hints for the MCP helper.
+    /// The orchestrator merges these into every new session's helper environment.
+    BackendCapabilities {
+        backend_name: String,
+        /// Key-value pairs injected into the helper subprocess env.
+        /// Example: `{"ORCHESTRATOR_ALLOWED_EMOJIS": "🎯,📌,🔥,..."}`
+        mcp_env: std::collections::HashMap<String, String>,
+    },
+
     /// A file upload from a user (image, PDF, attachment, …).
     FileUpload {
         task_id: TaskId,

@@ -254,7 +254,6 @@ dependencies = [
  "async-trait",
  "backend-traits",
  "claude-events",
- "claude-orchestrator-llm",
  "futures-util",
  "pulldown-cmark 0.12.2",
  "reqwest 0.12.28",
@@ -655,6 +654,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "claude-orchestrator-helper"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "claude-orchestrator-llm"
 version = "0.1.0"
 dependencies = [
@@ -687,7 +698,6 @@ dependencies = [
  "claude-containers",
  "claude-events",
  "claude-ndjson",
- "claude-orchestrator-llm",
  "claude-shared",
  "dashmap 6.1.0",
  "dirs 5.0.1",
@@ -3135,6 +3145,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2 0.4.13",

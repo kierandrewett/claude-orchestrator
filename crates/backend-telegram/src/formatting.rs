@@ -1,24 +1,124 @@
 use claude_events::TaskStateSummary;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd, CodeBlockKind};
 
+// ---------------------------------------------------------------------------
+// Emoji title helpers
+// ---------------------------------------------------------------------------
+
+/// Split a title like "🤔 General chat" into ("🤔", "General chat").
+///
+/// The first segment (before the first space) is treated as an emoji if it
+/// contains no ASCII alphanumeric characters. Returns (None, full_title) if
+/// no emoji prefix is detected.
+pub fn split_emoji_from_title(title: &str) -> (Option<String>, String) {
+    let title = title.trim();
+    if let Some(space_pos) = title.find(' ') {
+        let candidate = &title[..space_pos];
+        let rest = title[space_pos..].trim().to_string();
+        let looks_like_emoji = !candidate.is_empty()
+            && !candidate.chars().any(|c| c.is_ascii_alphanumeric());
+        if looks_like_emoji {
+            return (Some(candidate.to_string()), rest);
+        }
+    }
+    (None, title.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Name helpers
+// ---------------------------------------------------------------------------
+
+/// Convert a camelCase or snake_case identifier to Title Case words.
+/// "ToolSearch" → "Tool Search", "rename_conversation" → "Rename Conversation"
+fn to_title_case(s: &str) -> String {
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for ch in s.chars() {
+        if ch == '_' || ch == '-' {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+        } else if ch.is_uppercase() && !current.is_empty() {
+            words.push(std::mem::take(&mut current));
+            current.push(ch);
+        } else if current.is_empty() {
+            current.push(ch.to_ascii_uppercase());
+        } else {
+            current.push(ch);
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words.join(" ")
+}
+
+/// Parse `mcp__server__tool_name` → `("Server", "Tool Name")`.
+fn parse_mcp_name(tool_name: &str) -> Option<(String, String)> {
+    let rest = tool_name.strip_prefix("mcp__")?;
+    let (server, tool) = rest.split_once("__")?;
+    Some((to_title_case(server), to_title_case(tool)))
+}
+
+/// Human-readable display name for any tool.
+fn display_name(tool_name: &str) -> String {
+    if let Some((server, tool)) = parse_mcp_name(tool_name) {
+        format!("{server}: {tool}")
+    } else {
+        to_title_case(tool_name)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Emoji + detail helpers
+// ---------------------------------------------------------------------------
+
 /// Return an emoji for a given tool name.
 fn tool_emoji(tool_name: &str) -> &'static str {
+    if parse_mcp_name(tool_name).is_some() {
+        return "🔌";
+    }
     match tool_name {
         "Bash" => "💻",
         "Read" => "📖",
         "Write" => "✍️",
         "Edit" => "✏️",
         "NotebookEdit" => "📓",
-        "Glob" => "🔍",
-        "Grep" => "🔍",
+        "Glob" | "Grep" => "🔍",
         "WebFetch" | "WebSearch" => "🌐",
         "Agent" => "🤖",
         "TodoWrite" | "TodoRead" => "📋",
+        "Task" | "TaskOutput" | "TaskStop" => "🗂",
+        "ToolSearch" => "🔍",
+        "AskUserQuestion" => "❓",
         _ => "🔧",
     }
 }
 
-/// For the Agent tool, extract the display name (subagent_type if present) and detail text.
+/// Format JSON args as `Key: value` lines (used for MCP tools and fallback).
+fn format_kv_args(summary: &str) -> String {
+    let val: serde_json::Value = serde_json::from_str(summary).unwrap_or_default();
+    if let Some(obj) = val.as_object() {
+        let lines: Vec<String> = obj
+            .iter()
+            .map(|(k, v)| {
+                let key = to_title_case(k);
+                let value = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                let truncated: String = value.chars().take(200).collect();
+                format!("{key}: {truncated}")
+            })
+            .collect();
+        lines.join("\n")
+    } else {
+        summary.chars().take(300).collect()
+    }
+}
+
+/// For the Agent tool, extract display name and detail text.
 fn agent_display(summary: &str) -> (String, String) {
     let val: serde_json::Value = serde_json::from_str(summary).unwrap_or_default();
     let subagent_type = val
@@ -36,18 +136,48 @@ fn agent_display(summary: &str) -> (String, String) {
     (subagent_type, detail)
 }
 
+/// Build the detail block shown below the tool name line.
+fn tool_detail(tool_name: &str, summary: &str) -> String {
+    // MCP tools: format args as `Key: value` lines in a code block.
+    if parse_mcp_name(tool_name).is_some() {
+        let args = format_kv_args(summary);
+        if args.is_empty() { return String::new(); }
+        return format!("<code>   ❯ {}</code>", escape_html(&args));
+    }
+
+    let val: serde_json::Value = serde_json::from_str(summary).unwrap_or_default();
+    let field = match tool_name {
+        "Bash" => val.get("command"),
+        "Read" | "Write" | "Edit" | "NotebookEdit" => val.get("file_path"),
+        "Glob" | "Grep" => val.get("pattern"),
+        "WebFetch" | "WebSearch" => val.get("url").or_else(|| val.get("query")),
+        "Agent" => val.get("description").or_else(|| val.get("prompt")),
+        "ToolSearch" => val.get("query"),
+        _ => None,
+    };
+    let text = field.and_then(|v| v.as_str()).unwrap_or(summary);
+    let truncated: String = text.chars().take(300).collect();
+    format!("<code>   ❯ {}</code>", escape_html(&truncated))
+}
+
+// ---------------------------------------------------------------------------
+// Public formatters
+// ---------------------------------------------------------------------------
+
 /// Format a tool_started event.
 pub fn format_tool_started(tool_name: &str, summary: &str) -> String {
     let emoji = tool_emoji(tool_name);
-    if tool_name == "Agent" {
+    let name = if tool_name == "Agent" {
         let (subagent_type, detail) = agent_display(summary);
-        return format!("{} <b>{}</b>\n{}", emoji, escape_html(&subagent_type), detail);
-    }
+        return format!("{emoji} <b>{}</b>\n{}", escape_html(&subagent_type), detail);
+    } else {
+        display_name(tool_name)
+    };
     let detail = tool_detail(tool_name, summary);
-    format!("{} <b>{}</b>\n{}", emoji, escape_html(tool_name), detail)
+    format!("{emoji} <b>{}</b>\n{}", escape_html(&name), detail)
 }
 
-/// Format a tool_completed event (edits the started message).
+/// Format a tool_completed event (replaces the started message).
 pub fn format_tool_completed(
     tool_name: &str,
     summary: &str,
@@ -56,11 +186,10 @@ pub fn format_tool_completed(
 ) -> String {
     let emoji = tool_emoji(tool_name);
     let status = if is_error { "❌" } else { "✅" };
-    let (display_name, detail) = if tool_name == "Agent" {
-        let (subagent_type, d) = agent_display(summary);
-        (subagent_type, d)
+    let (name, detail) = if tool_name == "Agent" {
+        agent_display(summary)
     } else {
-        (tool_name.to_string(), tool_detail(tool_name, summary))
+        (display_name(tool_name), tool_detail(tool_name, summary))
     };
     let preview_str = preview
         .filter(|p| !p.is_empty())
@@ -74,30 +203,11 @@ pub fn format_tool_completed(
                 let last3 = lines[lines.len() - 3..].join("\n");
                 format!("{}\n…({} lines total)…\n{}", first2, total, last3)
             };
-            // Truncate in case lines are very long.
             let truncated: String = text.chars().take(600).collect();
             format!("\n<code>{}</code>", escape_html(&truncated))
         })
         .unwrap_or_default();
-    format!("{} {} <b>{}</b>\n{}{}", status, emoji, escape_html(&display_name), detail, preview_str)
-}
-
-/// Extract the most meaningful field from a tool's JSON input for display.
-fn tool_detail(tool_name: &str, summary: &str) -> String {
-    let val: serde_json::Value = serde_json::from_str(summary).unwrap_or_default();
-    let field = match tool_name {
-        "Bash" => val.get("command"),
-        "Read" | "Write" | "Edit" | "NotebookEdit" => val.get("file_path"),
-        "Glob" | "Grep" => val.get("pattern"),
-        "WebFetch" | "WebSearch" => val.get("url").or_else(|| val.get("query")),
-        "Agent" => val.get("description").or_else(|| val.get("prompt")),
-        _ => None,
-    };
-    let text = field
-        .and_then(|v| v.as_str())
-        .unwrap_or(summary);
-    let truncated: String = text.chars().take(300).collect();
-    format!("<code>   ❯ {}</code>", escape_html(&truncated))
+    format!("{status} {emoji} <b>{}</b>\n{}{}", escape_html(&name), detail, preview_str)
 }
 
 /// Format a turn_complete event as an inline suffix (italic, appended on new line).

@@ -25,6 +25,21 @@ pub enum ParsedCommand {
 
     /// `/config <key> <value>` — update a task config option.
     Config { key: String, value: String },
+
+    /// `/mcp [list]` — list configured MCP servers.
+    McpList,
+
+    /// `/mcp add <name> <command> [args...]` — add a new MCP server.
+    McpAdd { name: String, command: String, args: Vec<String> },
+
+    /// `/mcp remove <name>` — remove a custom MCP server.
+    McpRemove { name: String },
+
+    /// `/mcp disable <name>` — disable an MCP server (including built-ins).
+    McpDisable { name: String },
+
+    /// `/mcp enable <name>` — re-enable a disabled MCP server.
+    McpEnable { name: String },
 }
 
 /// Parse a text string beginning with `/` into a `ParsedCommand`.
@@ -87,6 +102,52 @@ pub fn parse(text: &str) -> Result<ParsedCommand> {
                 .ok_or_else(|| anyhow::anyhow!("usage: /config <key> <value>"))?
                 .to_string();
             Ok(ParsedCommand::Config { key, value })
+        }
+
+        "/mcp" => {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            match parts.first().map(|s| s.to_lowercase()).as_deref() {
+                None | Some("list") => Ok(ParsedCommand::McpList),
+                Some("add") => {
+                    let name = parts
+                        .get(1)
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| anyhow::anyhow!("usage: /mcp add <name> <command> [args...]"))?
+                        .to_string();
+                    let command = parts
+                        .get(2)
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| anyhow::anyhow!("usage: /mcp add <name> <command> [args...]"))?
+                        .to_string();
+                    let args = parts[3..].iter().map(|s| s.to_string()).collect();
+                    Ok(ParsedCommand::McpAdd { name, command, args })
+                }
+                Some("remove") => {
+                    let name = parts
+                        .get(1)
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| anyhow::anyhow!("usage: /mcp remove <name>"))?
+                        .to_string();
+                    Ok(ParsedCommand::McpRemove { name })
+                }
+                Some("disable") => {
+                    let name = parts
+                        .get(1)
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| anyhow::anyhow!("usage: /mcp disable <name>"))?
+                        .to_string();
+                    Ok(ParsedCommand::McpDisable { name })
+                }
+                Some("enable") => {
+                    let name = parts
+                        .get(1)
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| anyhow::anyhow!("usage: /mcp enable <name>"))?
+                        .to_string();
+                    Ok(ParsedCommand::McpEnable { name })
+                }
+                Some(other) => bail!("unknown /mcp subcommand '{}'. Use: list, add, remove, disable, enable", other),
+            }
         }
 
         other => bail!("unknown command '{}'", other),

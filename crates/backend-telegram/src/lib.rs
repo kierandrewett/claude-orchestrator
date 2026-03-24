@@ -6,6 +6,5 @@ pub mod formatting;
 pub mod reactions;
 pub mod streaming;
 pub mod topics;
-pub mod voice;
 
 pub use backend::TelegramBackend;

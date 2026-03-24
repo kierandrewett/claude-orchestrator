@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use claude_events::{
@@ -12,6 +12,7 @@ use claude_shared::S2C;
 use crate::client_registry::ClientRegistry;
 use crate::commands::{build_cost, build_status};
 use crate::config::OrchestratorConfig;
+use crate::mcp_registry::{McpServerEntry, McpServerRegistry};
 use crate::task_manager::{Task, TaskRegistry, TaskState};
 
 pub struct Orchestrator {
@@ -21,6 +22,9 @@ pub struct Orchestrator {
     #[allow(dead_code)]
     pub config: OrchestratorConfig,
     pub store: Arc<crate::persistence::StateStore>,
+    pub mcp_registry: Arc<McpServerRegistry>,
+    /// Merged MCP env extras from all backend capability announcements.
+    backend_caps: std::sync::Mutex<std::collections::HashMap<String, String>>,
 }
 
 impl Orchestrator {
@@ -30,8 +34,61 @@ impl Orchestrator {
         clients: Arc<ClientRegistry>,
         config: OrchestratorConfig,
         store: Arc<crate::persistence::StateStore>,
+        mcp_registry: Arc<McpServerRegistry>,
     ) -> Self {
-        Self { bus, registry, clients, config, store }
+        Self { bus, registry, clients, config, store, mcp_registry, backend_caps: Default::default() }
+    }
+
+    fn backend_mcp_extra_env(&self) -> std::collections::HashMap<String, String> {
+        self.backend_caps.lock().unwrap().clone()
+    }
+
+    /// Build the system prompt to inject into every new session.
+    ///
+    /// Prepends a fixed instruction so Claude always calls `rename_conversation`
+    /// after its first response, then appends any user-configured system prompt.
+    fn session_system_prompt(&self, is_scratchpad: bool) -> Option<String> {
+        const RENAME_INSTRUCTION: &str =
+            "You have access to a tool called `mcp__orchestrator__rename_conversation`. \
+             Use it to keep the conversation title up to date. \
+             Call it after your first response, and again whenever the topic has meaningfully shifted. \
+             The title should reflect what is being discussed right now, not just the opening message. \
+             Format the title as an emoji followed by a short phrase (3-5 words). \
+             CRITICAL RULES: \
+             (1) Call `mcp__orchestrator__rename_conversation` directly by that exact name — NEVER use ToolSearch to look it up first. \
+             (2) The rename call must be the absolute last thing in your response — no text before or after it, no acknowledgement, nothing.";
+
+        let base = if is_scratchpad {
+            // Scratchpad has a fixed title — no rename instruction.
+            self.config.server.system_prompt.clone()
+        } else {
+            match &self.config.server.system_prompt {
+                Some(user_prompt) => Some(format!("{RENAME_INSTRUCTION}\n\n{user_prompt}")),
+                None => Some(RENAME_INSTRUCTION.to_string()),
+            }
+        };
+        base
+    }
+
+    fn is_scratchpad(task_id: &TaskId) -> bool {
+        task_id.0 == "scratchpad"
+    }
+
+    /// Build the list of custom MCP servers and disabled server names to pass to StartSession.
+    fn mcp_session_args(&self) -> (Vec<claude_shared::McpServerDef>, Vec<String>) {
+        let custom = self.mcp_registry.custom_servers();
+        let disabled = self.mcp_registry.disabled_names();
+        let servers = custom
+            .into_iter()
+            .filter(|s| !s.disabled)
+            .map(|s| claude_shared::McpServerDef {
+                name: s.name,
+                command: s.command,
+                args: s.args,
+                env: s.env,
+            })
+            .collect();
+        (servers, disabled)
     }
 
     fn save_state(&self) {
@@ -72,6 +129,11 @@ impl Orchestrator {
 
     async fn handle_backend_event(&self, event: BackendEvent) {
         match event {
+            BackendEvent::BackendCapabilities { backend_name, mcp_env } => {
+                info!("orchestrator: received backend capabilities from '{backend_name}'");
+                let mut caps = self.backend_caps.lock().unwrap();
+                caps.extend(mcp_env);
+            }
             BackendEvent::UserMessage { task_id, text, message_ref, .. } => {
                 self.handle_user_message(&task_id, text, Some(message_ref)).await;
             }
@@ -253,6 +315,13 @@ impl Orchestrator {
                     trigger_message: msg_ref.clone(),
                 });
 
+                let scratchpad = Self::is_scratchpad(task_id);
+                let (mcp_servers, disabled_mcp_servers) = self.mcp_session_args();
+                let suppress_mcp_tools = if scratchpad {
+                    vec!["rename_conversation".to_string()]
+                } else {
+                    vec![]
+                };
                 let delivered = self.clients.send_to_any_client(S2C::StartSession {
                     session_id,
                     initial_prompt: Some(text),
@@ -260,7 +329,11 @@ impl Orchestrator {
                     extra_args: vec![],
                     claude_session_id,
                     is_resume: false,
-                    system_prompt: self.config.server.system_prompt.clone(),
+                    system_prompt: self.session_system_prompt(scratchpad),
+                    mcp_servers,
+                    disabled_mcp_servers,
+                    suppress_mcp_tools,
+                    mcp_extra_env: self.backend_mcp_extra_env(),
                 });
 
                 if !delivered {
@@ -329,6 +402,44 @@ impl Orchestrator {
             ParsedCommand::New { profile, prompt } => {
                 self.create_task(profile, prompt, TaskKind::Job).await;
             }
+            ParsedCommand::McpList => {
+                let text = self.mcp_registry.list_display();
+                self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
+            }
+            ParsedCommand::McpAdd { name, command, args } => {
+                let text = match self.mcp_registry.add(McpServerEntry {
+                    name: name.clone(),
+                    command: command.clone(),
+                    args: args.clone(),
+                    env: Default::default(),
+                    disabled: false,
+                }) {
+                    Ok(()) => format!("Added MCP server '{name}' ({command})"),
+                    Err(e) => format!("Error: {e}"),
+                };
+                self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
+            }
+            ParsedCommand::McpRemove { name } => {
+                let text = match self.mcp_registry.remove(&name) {
+                    Ok(()) => format!("Removed MCP server '{name}'"),
+                    Err(e) => format!("Error: {e}"),
+                };
+                self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
+            }
+            ParsedCommand::McpDisable { name } => {
+                let text = match self.mcp_registry.disable(&name) {
+                    Ok(()) => format!("Disabled MCP server '{name}'"),
+                    Err(e) => format!("Error: {e}"),
+                };
+                self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
+            }
+            ParsedCommand::McpEnable { name } => {
+                let text = match self.mcp_registry.enable(&name) {
+                    Ok(()) => format!("Enabled MCP server '{name}'"),
+                    Err(e) => format!("Error: {e}"),
+                };
+                self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
+            }
         }
     }
 
@@ -395,6 +506,7 @@ impl Orchestrator {
             trigger_message: None,
         });
 
+        let (mcp_servers, disabled_mcp_servers) = self.mcp_session_args();
         let delivered = self.clients.send_to_any_client(S2C::StartSession {
             session_id,
             initial_prompt: if prompt.is_empty() { None } else { Some(prompt) },
@@ -402,7 +514,11 @@ impl Orchestrator {
             extra_args: vec![],
             claude_session_id,
             is_resume: false,
-            system_prompt: self.config.server.system_prompt.clone(),
+            system_prompt: self.session_system_prompt(false),
+            mcp_servers,
+            disabled_mcp_servers,
+            suppress_mcp_tools: vec![],
+            mcp_extra_env: self.backend_mcp_extra_env(),
         });
 
         if !delivered {

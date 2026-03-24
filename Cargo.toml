@@ -14,6 +14,7 @@ members = [
     "crates/backend-web",
     "crates/backend-stdio",
     "crates/claude-generate-config",
+    "crates/helper",
 ]
 
 [workspace.dependencies]

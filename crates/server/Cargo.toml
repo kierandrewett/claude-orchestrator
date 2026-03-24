@@ -12,7 +12,6 @@ claude-ndjson          = { path = "../ndjson" }
 claude-events          = { path = "../events" }
 claude-shared          = { path = "../shared" }
 claude-containers      = { path = "../containers" }
-claude-orchestrator-llm = { path = "../orchestrator-llm" }
 backend-traits         = { path = "../backend-traits" }
 backend-discord        = { path = "../backend-discord" }
 backend-telegram       = { path = "../backend-telegram" }

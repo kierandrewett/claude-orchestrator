@@ -132,6 +132,9 @@ fn print_event(ev: &OrchestratorEvent) {
         OrchestratorEvent::MessageQueued { task_id, .. } => {
             println!("[{task_id}] ⏰ Message queued (Claude is busy)");
         }
+        OrchestratorEvent::ConversationRenamed { task_id, title } => {
+            println!("[{task_id}] ✏️  Conversation renamed to '{title}'");
+        }
     }
 }
 

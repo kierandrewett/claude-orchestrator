@@ -110,6 +110,17 @@ impl TaskRegistry {
     pub fn all_ids(&self) -> Vec<TaskId> {
         self.tasks.iter().map(|r| r.key().clone()).collect()
     }
+
+    pub fn find_by_session_id(&self, session_id: &str) -> Option<TaskId> {
+        self.tasks.iter().find_map(|entry| {
+            if let TaskState::Running { session_id: ref sid } = entry.value().state {
+                if sid == session_id {
+                    return Some(entry.key().clone());
+                }
+            }
+            None
+        })
+    }
 }
 
 impl Default for TaskRegistry {

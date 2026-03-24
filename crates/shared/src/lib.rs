@@ -2,6 +2,17 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// A custom MCP server definition passed from the server to a client session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerDef {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
 // ── Session types ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -98,6 +109,18 @@ pub enum S2C {
         system_prompt: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         initial_files: Vec<AttachedFile>,
+        /// Additional MCP servers to inject into the session's MCP config.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mcp_servers: Vec<McpServerDef>,
+        /// Names of MCP servers to disable (including built-ins like "orchestrator").
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        disabled_mcp_servers: Vec<String>,
+        /// MCP tool names to suppress: hidden from tools/list and rejected at tools/call.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        suppress_mcp_tools: Vec<String>,
+        /// Extra env vars injected into the MCP helper subprocess (e.g. allowed emoji list).
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        mcp_extra_env: HashMap<String, String>,
     },
     SendInput {
         session_id: String,

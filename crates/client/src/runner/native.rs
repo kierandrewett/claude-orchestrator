@@ -5,6 +5,8 @@ use async_trait::async_trait;
 use tokio::process::{Child, Command};
 use libc;
 
+use tracing::{info, warn};
+
 use super::Runner;
 use crate::session_runner::SessionConfig;
 
@@ -34,6 +36,105 @@ impl Runner for NativeRunner {
 
         if let Some(ref prompt) = config.system_prompt {
             cmd.args(["--system-prompt", prompt]);
+        }
+
+        cmd.env("ORCHESTRATOR_URL", &config.orchestrator_url);
+        cmd.env("ORCHESTRATOR_SESSION_ID", &config.session_id);
+        if let Some(ref token) = config.orchestrator_token {
+            cmd.env("ORCHESTRATOR_TOKEN", token);
+        }
+
+        // Write a per-session MCP config so Claude Code discovers the orchestrator
+        // tools. Uses stdio transport (command) since Claude Code's --mcp-config
+        // does not support URL-based servers. Env vars are embedded so the helper
+        // subprocess receives them regardless of what Claude Code inherits.
+        let mcp_config_path = format!("/tmp/orchestrator_mcp_{}.json", config.session_id);
+        let mut mcp_env = serde_json::Map::new();
+        mcp_env.insert(
+            "ORCHESTRATOR_URL".into(),
+            serde_json::Value::String(config.orchestrator_url.clone()),
+        );
+        mcp_env.insert(
+            "ORCHESTRATOR_SESSION_ID".into(),
+            serde_json::Value::String(config.session_id.clone()),
+        );
+        if let Some(ref token) = config.orchestrator_token {
+            mcp_env.insert(
+                "ORCHESTRATOR_TOKEN".into(),
+                serde_json::Value::String(token.clone()),
+            );
+        }
+        if !config.suppress_mcp_tools.is_empty() {
+            mcp_env.insert(
+                "ORCHESTRATOR_SUPPRESS_TOOLS".into(),
+                serde_json::Value::String(config.suppress_mcp_tools.join(",")),
+            );
+        }
+        for (k, v) in &config.mcp_extra_env {
+            mcp_env.insert(k.clone(), serde_json::Value::String(v.clone()));
+        }
+        // Resolve the helper binary: prefer a sibling in the same directory as
+        // this client binary (works for both cargo target dirs and installed
+        // locations), fall back to PATH lookup.
+        let helper_cmd = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("claude-orchestrator-helper")))
+            .filter(|p| p.exists())
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| {
+                warn!("claude-orchestrator-helper not found alongside client binary, falling back to PATH");
+                "claude-orchestrator-helper".to_string()
+            });
+
+        info!(helper = %helper_cmd, config = %mcp_config_path, "writing MCP config");
+
+        let disabled: std::collections::HashSet<&str> =
+            config.disabled_mcp_servers.iter().map(|s| s.as_str()).collect();
+
+        let mut mcp_servers = serde_json::Map::new();
+
+        // Built-in orchestrator server (unless disabled).
+        if !disabled.contains("orchestrator") {
+            mcp_servers.insert(
+                "orchestrator".to_string(),
+                serde_json::json!({
+                    "command": helper_cmd,
+                    "args": ["mcp"],
+                    "env": mcp_env
+                }),
+            );
+        }
+
+        // User-configured custom servers.
+        for srv in &config.mcp_servers {
+            if disabled.contains(srv.name.as_str()) {
+                continue;
+            }
+            let srv_env: serde_json::Map<String, serde_json::Value> = srv
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect();
+            mcp_servers.insert(
+                srv.name.clone(),
+                serde_json::json!({
+                    "command": srv.command,
+                    "args": srv.args,
+                    "env": srv_env
+                }),
+            );
+        }
+
+        let mcp_config = serde_json::json!({ "mcpServers": mcp_servers });
+        match serde_json::to_string(&mcp_config) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&mcp_config_path, &json) {
+                    warn!("failed to write MCP config to {mcp_config_path}: {e}");
+                } else {
+                    cmd.args(["--mcp-config", &mcp_config_path]);
+                }
+            }
+            Err(e) => warn!("failed to serialise MCP config: {e}"),
         }
 
         cmd.current_dir(&config.default_cwd)

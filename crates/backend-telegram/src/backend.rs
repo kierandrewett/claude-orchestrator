@@ -15,7 +15,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::formatting::{
     format_error, format_hibernated, format_thinking, format_tool_completed, format_tool_started,
-    format_turn_complete, md_to_telegram_html,
+    format_turn_complete, md_to_telegram_html, split_emoji_from_title,
 };
 use crate::reactions::{apply_reaction, clear_reaction, ReactionTracker};
 use crate::streaming::StreamingState;
@@ -30,7 +30,8 @@ pub struct TelegramConfig {
     pub voice_stt_api_key: Option<String>,
     pub show_thinking: bool,
     pub state_dir: std::path::PathBuf,
-    pub llm: Option<std::sync::Arc<claude_orchestrator_llm::OrchestratorLlm>>,
+    /// Tool names whose call/result events are not shown to the user.
+    pub hidden_tools: Vec<String>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
@@ -70,6 +71,8 @@ struct TaskTopicState {
     /// Tool name/summary saved from ToolStarted (ToolCompleted has empty fields).
     pending_tool_name: String,
     pending_tool_summary: String,
+    /// True if the pending tool is in the hidden_tools list (suppress display).
+    pending_tool_hidden: bool,
     /// Accumulated HTML for the current tool group message.
     tool_group_text: String,
     /// Byte offset in `tool_group_text` where the last pending tool entry starts.
@@ -78,8 +81,6 @@ struct TaskTopicState {
     /// The most recent bot message ID sent in this task's topic.
     /// Used as fallback reply target when trigger_ref is cleared (e.g. second turn).
     last_bot_message_id: Option<i32>,
-    /// Number of turns completed — used to trigger first-turn topic rename.
-    turns_completed: u32,
 }
 
 impl TaskTopicState {
@@ -92,10 +93,10 @@ impl TaskTopicState {
             processing_msg_id: None,
             pending_tool_name: String::new(),
             pending_tool_summary: String::new(),
+            pending_tool_hidden: false,
             tool_group_text: String::new(),
             last_tool_start_offset: 0,
             last_bot_message_id: None,
-            turns_completed: 0,
         }
     }
 }
@@ -124,6 +125,32 @@ impl MessagingBackend for TelegramBackend {
         let bot = Bot::new(&self.config.bot_token);
         let group_id = ChatId(self.config.supergroup_id);
         let state_dir = self.config.state_dir.clone();
+        let hidden_tools = self.config.hidden_tools.clone();
+
+        // Fetch available forum topic icon emojis and announce them to the orchestrator
+        // so the MCP helper can constrain Claude to valid emoji choices.
+        {
+            use teloxide::prelude::Requester;
+            match bot.get_forum_topic_icon_stickers().await {
+                Ok(stickers) => {
+                    let emojis: Vec<String> = stickers
+                        .iter()
+                        .filter_map(|s| s.emoji.clone())
+                        .collect();
+                    if !emojis.is_empty() {
+                        let emoji_str = emojis.join(",");
+                        info!("telegram: announcing {} allowed topic emojis", emojis.len());
+                        let mut mcp_env = std::collections::HashMap::new();
+                        mcp_env.insert("ORCHESTRATOR_ALLOWED_EMOJIS".to_string(), emoji_str);
+                        let _ = backend_sender.send(BackendEvent::BackendCapabilities {
+                            backend_name: "telegram".to_string(),
+                            mcp_env,
+                        }).await;
+                    }
+                }
+                Err(e) => warn!("telegram: failed to fetch topic icon stickers: {e}"),
+            }
+        }
 
         // Load persisted state.
         let persisted = TelegramState::load(&state_dir);
@@ -275,7 +302,7 @@ impl MessagingBackend for TelegramBackend {
 
             let mut states = task_states.lock().await;
             let mut t2t = thread_to_task.lock().await;
-            handle_orch_event(&bot, group_id, &event, &mut states, &mut t2t, &state_dir, self.config.llm.clone()).await;
+            handle_orch_event(&bot, group_id, &event, &mut states, &mut t2t, &state_dir, &hidden_tools).await;
         }
     }
 }
@@ -287,7 +314,7 @@ async fn handle_orch_event(
     states: &mut HashMap<String, TaskTopicState>,
     thread_to_task: &mut HashMap<i32, String>,
     state_dir: &std::path::Path,
-    llm: Option<std::sync::Arc<claude_orchestrator_llm::OrchestratorLlm>>,
+    hidden_tools: &[String],
 ) {
     match event {
         OrchestratorEvent::TaskCreated { task_id, name, .. } => {
@@ -414,6 +441,13 @@ async fn handle_orch_event(
             // Force next TextOutput to start a fresh message instead of appending.
             state.streaming.reset_text();
 
+            // Hidden tools: track but don't display.
+            if hidden_tools.iter().any(|h| h == tool_name) {
+                state.pending_tool_hidden = true;
+                return;
+            }
+            state.pending_tool_hidden = false;
+
             let entry = format_tool_started(tool_name, summary);
 
             // Append to the tool group, recording where this entry starts so
@@ -464,6 +498,13 @@ async fn handle_orch_event(
             let thread_id = state.thread_id;
             let name = std::mem::take(&mut state.pending_tool_name);
             let summary = std::mem::take(&mut state.pending_tool_summary);
+            let was_hidden = std::mem::replace(&mut state.pending_tool_hidden, false);
+
+            // Hidden tool: no display update needed.
+            if was_hidden {
+                return;
+            }
+
             let completed_entry =
                 format_tool_completed(&name, &summary, *is_error, output_preview.as_deref());
 
@@ -524,34 +565,6 @@ async fn handle_orch_event(
             let last_msg_id = state.streaming.current_message_id;
             let last_raw = state.streaming.current_text.clone();
             state.streaming.reset();
-
-            // On the first turn, generate a title and rename the topic.
-            if state.turns_completed == 0 && !last_raw.is_empty() {
-                if let Some(tid) = thread_id {
-                    let bot_clone = bot.clone();
-                    let response_preview = last_raw.chars().take(600).collect::<String>();
-                    let llm_clone = llm.clone();
-                    tokio::spawn(async move {
-                        let title = if let Some(llm) = llm_clone {
-                            llm.suggest_title(&response_preview).await
-                        } else {
-                            // Fallback: first non-empty line truncated to 60 chars.
-                            let line = response_preview.trim().lines().next().unwrap_or("")
-                                .trim_start_matches('#').trim();
-                            let t: String = line.chars().take(60).collect();
-                            if t.len() == 60 { t.rsplit_once(' ').map(|(s,_)| s.to_string()).unwrap_or(t) } else { t }
-                        };
-                        if title.is_empty() { return; }
-                        use teloxide::prelude::Requester;
-                        if let Err(e) = bot_clone.edit_forum_topic(group_id, tid).name(title.clone()).await {
-                            warn!("telegram: failed to rename topic {:?}: {e}", tid);
-                        } else {
-                            info!("telegram: renamed topic {:?} to '{title}'", tid);
-                        }
-                    });
-                }
-            }
-            state.turns_completed += 1;
 
             if let Some(msg_id) = last_msg_id {
                 use teloxide::prelude::Requester;
@@ -657,6 +670,44 @@ async fn handle_orch_event(
                 .or_else(|| task_id.as_ref().and_then(|id| states.get(&id.0)).and_then(|s| s.thread_id));
             let reply_to = telegram_msg_id(trigger_ref);
             send_text_reply(bot, group_id, thread_id, text, reply_to, false).await;
+        }
+
+        OrchestratorEvent::ConversationRenamed { task_id, title } => {
+            // Never rename the scratchpad topic.
+            if task_id.0 == "scratchpad" {
+                debug!("telegram: ignoring ConversationRenamed for scratchpad");
+            } else {
+                let state = states
+                    .entry(task_id.0.clone())
+                    .or_insert_with(|| TaskTopicState::new(None));
+                if let Some(tid) = state.thread_id {
+                    let bot_clone = bot.clone();
+                    let title = title.clone();
+                    tokio::spawn(async move {
+                        use teloxide::prelude::Requester;
+                        // Parse optional leading emoji: "🤔 General chat" → ("🤔", "General chat")
+                        let (emoji_str, display_title) = split_emoji_from_title(&title);
+                        let display_title = if display_title.is_empty() { title.clone() } else { display_title };
+
+                        // Resolve the custom emoji ID for the thread icon if we have an emoji.
+                        let icon_emoji_id = if let Some(emoji) = emoji_str {
+                            crate::topics::find_topic_icon_emoji_id(&bot_clone, &emoji).await
+                        } else {
+                            None
+                        };
+
+                        let mut req = bot_clone.edit_forum_topic(group_id, tid).name(display_title.clone());
+                        if let Some(id) = icon_emoji_id {
+                            req = req.icon_custom_emoji_id(id);
+                        }
+                        if let Err(e) = req.await {
+                            warn!("telegram: ConversationRenamed: failed to rename topic: {e}");
+                        } else {
+                            info!("telegram: renamed topic to '{display_title}'");
+                        }
+                    });
+                }
+            }
         }
     }
 }

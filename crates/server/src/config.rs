@@ -8,8 +8,7 @@ use serde::{Deserialize, Serialize};
 pub struct OrchestratorConfig {
     pub server: ServerConfig,
     pub docker: DockerConfig,
-    pub orchestrator_llm: OrchestratorLlmConfig,
-    pub backends: BackendsConfig,
+pub backends: BackendsConfig,
     pub display: DisplayConfig,
     #[serde(default)]
     pub mounts: HashMap<String, MountConfig>,
@@ -76,14 +75,6 @@ impl Default for DockerConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct OrchestratorLlmConfig {
-    pub enabled: bool,
-    pub provider: Option<String>,
-    pub api_key: Option<String>,
-    pub model: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct BackendsConfig {
     pub telegram: Option<TelegramConfig>,
     pub discord: Option<DiscordConfig>,
@@ -99,6 +90,9 @@ pub struct TelegramConfig {
     pub allowed_users: Vec<i64>,
     pub voice_stt: Option<String>,
     pub voice_stt_api_key: Option<String>,
+    /// Tool calls still executed by Claude but not shown to the user in this backend.
+    #[serde(default)]
+    pub hidden_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -109,6 +103,9 @@ pub struct DiscordConfig {
     pub voice_stt: Option<String>,
     pub voice_tts: Option<String>,
     pub voice_tts_api_key: Option<String>,
+    /// Tool calls still executed by Claude but not shown to the user in this backend.
+    #[serde(default)]
+    pub hidden_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

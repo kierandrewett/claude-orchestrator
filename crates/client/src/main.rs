@@ -158,7 +158,26 @@ fn check_prerequisites() {
         std::process::exit(1);
     }
 
-    // 2. Check that credentials exist (~/.claude/.credentials.json).
+    // 2. Check the helper binary exists (sibling of this binary, or on PATH).
+    let helper_found = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("claude-orchestrator-helper")))
+        .map(|p| p.exists())
+        .unwrap_or(false)
+        || which::which("claude-orchestrator-helper").is_ok();
+
+    if !helper_found {
+        eprintln!(
+            "\x1b[1;31merror:\x1b[0m `claude-orchestrator-helper` not found.\n\
+             \n\
+             Build and install it alongside this binary:\n\
+             \n\
+             \x1b[1m  cargo install --path crates/helper\x1b[0m"
+        );
+        std::process::exit(1);
+    }
+
+    // 3. Check that credentials exist (~/.claude/.credentials.json).
     let creds = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("/"))
         .join(".claude")

@@ -126,4 +126,10 @@ pub enum OrchestratorEvent {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         trigger_ref: Option<MessageRef>,
     },
+
+    /// A session requested a conversation rename (e.g. via the helper CLI).
+    ConversationRenamed {
+        task_id: TaskId,
+        title: String,
+    },
 }

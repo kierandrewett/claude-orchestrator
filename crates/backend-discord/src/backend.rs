@@ -354,7 +354,8 @@ async fn handle_orch_event(
 
         OrchestratorEvent::PhaseChanged { .. }
         | OrchestratorEvent::QueuedMessageDelivered { .. }
-        | OrchestratorEvent::MessageQueued { .. } => {}
+        | OrchestratorEvent::MessageQueued { .. }
+        | OrchestratorEvent::ConversationRenamed { .. } => {}
     }
 }
 
@@ -413,6 +414,7 @@ fn event_name(event: &OrchestratorEvent) -> &'static str {
         OrchestratorEvent::MessageQueued { .. } => "MessageQueued",
         OrchestratorEvent::FileOutput { .. } => "FileOutput",
         OrchestratorEvent::CommandResponse { .. } => "CommandResponse",
+        OrchestratorEvent::ConversationRenamed { .. } => "ConversationRenamed",
     }
 }
 

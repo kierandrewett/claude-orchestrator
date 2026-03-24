@@ -230,6 +230,10 @@ async fn handle_text_message(
             is_resume,
             ref system_prompt,
             ref initial_files,
+            ref mcp_servers,
+            ref disabled_mcp_servers,
+            ref suppress_mcp_tools,
+            ref mcp_extra_env,
         } => {
             let sid = session_id.clone();
             info!("StartSession: session_id={sid}, is_resume={is_resume}");
@@ -279,6 +283,12 @@ async fn handle_text_message(
                 is_resume,
                 default_cwd: config.default_cwd.clone(),
                 system_prompt: system_prompt.clone(),
+                orchestrator_url: config.server_url.replace("ws://", "http://").replace("wss://", "https://"),
+                orchestrator_token: Some(config.client_token.clone()),
+                mcp_servers: mcp_servers.clone(),
+                disabled_mcp_servers: disabled_mcp_servers.clone(),
+                suppress_mcp_tools: suppress_mcp_tools.clone(),
+                mcp_extra_env: mcp_extra_env.clone(),
             };
 
             let ws_tx_clone = Arc::clone(ws_tx);

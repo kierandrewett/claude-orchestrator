@@ -10,7 +10,7 @@ use futures_util::SinkExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::ChildStdin;
 use tokio::sync::{mpsc, Mutex};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::protocol::{AttachedFile, SessionStats, C2S, S2C};
 
@@ -29,6 +29,16 @@ pub struct SessionConfig {
     pub is_resume: bool,           // true = use --resume, false = use --session-id
     pub default_cwd: String,       // working directory for spawning claude
     pub system_prompt: Option<String>,
+    pub orchestrator_url: String,
+    pub orchestrator_token: Option<String>,
+    /// Additional MCP servers to include in the session's MCP config.
+    pub mcp_servers: Vec<claude_shared::McpServerDef>,
+    /// Names of MCP servers to disable (including built-ins like "orchestrator").
+    pub disabled_mcp_servers: Vec<String>,
+    /// MCP tool names to suppress in the helper (hidden from tools/list, rejected at tools/call).
+    pub suppress_mcp_tools: Vec<String>,
+    /// Extra env vars injected into the MCP helper subprocess.
+    pub mcp_extra_env: std::collections::HashMap<String, String>,
 }
 
 /// Type alias for the write-half of a tokio-tungstenite WebSocket stream.
@@ -46,6 +56,7 @@ pub async fn run_session(
 ) {
     let runner = NativeRunner;
     let session_id = config.session_id.clone();
+    let mcp_config_path = format!("/tmp/orchestrator_mcp_{}.json", session_id);
 
     if let Err(e) = do_run(config, &ws_tx, cmd_rx, &runner).await {
         warn!("session {session_id} error: {e:#}");
@@ -60,6 +71,8 @@ pub async fn run_session(
         )
         .await;
     }
+
+    let _ = std::fs::remove_file(&mcp_config_path);
 }
 
 // ---------------------------------------------------------------------------
@@ -81,13 +94,15 @@ async fn do_run<R: Runner>(
     let stderr = child.stderr.take().expect("stderr piped");
 
     // Drain stderr in the background so it doesn't block the process.
+    // With --verbose, Claude outputs MCP server startup, tool calls, etc. here.
     let stderr_buf = Arc::new(Mutex::new(String::new()));
     {
+        let sid = session_id.clone();
         let buf = Arc::clone(&stderr_buf);
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                warn!("claude stderr: {line}");
+                info!(target: "claude_stderr", "[{sid}] {line}");
                 let mut b = buf.lock().await;
                 b.push_str(&line);
                 b.push('\n');
@@ -310,63 +325,73 @@ async fn send_to_stdin(
 
 /// Log an NDJSON line being written to Claude's stdin.
 fn log_ndjson_out(session_id: &str, line: &str) {
-    let label = ndjson_label(line);
-    tracing::debug!(target: "ndjson", "→ [{session_id}] {label}");
+    tracing::trace!(target: "ndjson", "→ [{session_id}] {line}");
+    debug!(target: "ndjson", "→ [{session_id}] (user message, {} bytes)", line.len());
 }
 
 /// Log an NDJSON line received from Claude's stdout.
 fn log_ndjson_in(session_id: &str, line: &str) {
-    let label = ndjson_label(line);
-    tracing::debug!(target: "ndjson", "← [{session_id}] {label}");
+    // Raw line at trace; parsed summary at debug; key events at info.
+    tracing::trace!(target: "ndjson", "← [{session_id}] {line}");
+    log_ndjson_event(session_id, line);
 }
 
-/// Extract a short human-readable label from an NDJSON line.
-fn ndjson_label(line: &str) -> String {
-    match serde_json::from_str::<serde_json::Value>(line) {
-        Ok(v) => {
-            let msg_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("?");
-            match msg_type {
-                "user" => {
-                    let content = v
-                        .pointer("/message/content")
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("…");
-                    let preview: String = content.chars().take(80).collect();
-                    let ellipsis = if content.len() > 80 { "…" } else { "" };
-                    format!("user: \"{preview}{ellipsis}\"")
-                }
-                "assistant" => {
-                    let text = v
-                        .pointer("/message/content/0/text")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("");
-                    let preview: String = text.chars().take(60).collect();
-                    let ellipsis = if text.len() > 60 { "…" } else { "" };
-                    format!("assistant: \"{preview}{ellipsis}\"")
-                }
-                "result" => {
-                    let cost = v.get("total_cost_usd").and_then(|c| c.as_f64());
-                    let turns = v.get("num_turns").and_then(|t| t.as_u64());
-                    match (turns, cost) {
-                        (Some(t), Some(c)) => format!("result: {t} turns, ${c:.4}"),
-                        (Some(t), None) => format!("result: {t} turns"),
-                        _ => "result".to_string(),
+/// Emit structured log lines for a Claude stdout event.
+fn log_ndjson_event(session_id: &str, line: &str) {
+    let v = match serde_json::from_str::<serde_json::Value>(line) {
+        Ok(v) => v,
+        Err(_) => {
+            let preview: String = line.chars().take(120).collect();
+            debug!(target: "ndjson", "← [{session_id}] (unparsed) {preview}");
+            return;
+        }
+    };
+
+    let msg_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("?");
+
+    match msg_type {
+        "assistant" => {
+            // Log text at debug, tool_use blocks at info.
+            if let Some(content) = v.pointer("/message/content").and_then(|c| c.as_array()) {
+                for block in content {
+                    match block.get("type").and_then(|t| t.as_str()) {
+                        Some("text") => {
+                            let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                            let preview: String = text.chars().take(80).collect();
+                            let ellipsis = if text.len() > 80 { "…" } else { "" };
+                            info!(target: "ndjson", "← [{session_id}] assistant: \"{preview}{ellipsis}\"");
+                        }
+                        Some("tool_use") => {
+                            let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                            let input = block.get("input").map(|i| i.to_string()).unwrap_or_default();
+                            info!(target: "ndjson", "← [{session_id}] tool_use: {name} {input}");
+                        }
+                        _ => {}
                     }
                 }
-                "tool_use" => {
-                    let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-                    format!("tool_use: {name}")
-                }
-                "tool_result" => {
-                    let id = v.get("tool_use_id").and_then(|i| i.as_str()).unwrap_or("?");
-                    format!("tool_result: {id}")
-                }
-                other => other.to_string(),
             }
         }
-        Err(_) => {
-            let preview: String = line.chars().take(80).collect();
-            format!("(unparsed) {preview}")
+        "tool_result" => {
+            let id = v.get("tool_use_id").and_then(|i| i.as_str()).unwrap_or("?");
+            let content = v.pointer("/content/0/text").and_then(|t| t.as_str()).unwrap_or("");
+            info!(target: "ndjson", "← [{session_id}] tool_result: {id} → {content}");
+        }
+        "result" => {
+            let cost = v.get("total_cost_usd").and_then(|c| c.as_f64());
+            let turns = v.get("num_turns").and_then(|t| t.as_u64());
+            match (turns, cost) {
+                (Some(t), Some(c)) => info!(target: "ndjson", "← [{session_id}] result: {t} turns, ${c:.4}"),
+                (Some(t), None)    => info!(target: "ndjson", "← [{session_id}] result: {t} turns"),
+                _                  => info!(target: "ndjson", "← [{session_id}] result"),
+            }
+        }
+        "system" => {
+            let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("?");
+            // Log the full payload — contains tools list and mcp_servers on init.
+            info!(target: "ndjson", "← [{session_id}] system/{subtype} {v}");
+        }
+        other => {
+            debug!(target: "ndjson", "← [{session_id}] {other}");
         }
     }
 }
