@@ -221,6 +221,27 @@ impl MessagingBackend for TelegramBackend {
 
         info!("telegram: backend started for group {group_id}");
 
+        // Register the bot's command list with Telegram so they appear in the
+        // "/" autocomplete menu. This overwrites any stale commands from BotFather.
+        {
+            use teloxide::prelude::Requester;
+            use teloxide::types::BotCommand;
+            let commands = vec![
+                BotCommand::new("status",    "List all tasks"),
+                BotCommand::new("cancel",    "Interrupt the current Claude response"),
+                BotCommand::new("stop",      "Stop the current (or specified) task"),
+                BotCommand::new("hibernate", "Hibernate the current task"),
+                BotCommand::new("cost",      "Show usage and cost summary"),
+                BotCommand::new("config",    "Update a task config option"),
+                BotCommand::new("mcp",       "Manage MCP servers"),
+                BotCommand::new("init",      "Set up the Scratchpad topic"),
+                BotCommand::new("reconnect", "Reconnect to the orchestrator"),
+            ];
+            if let Err(e) = bot.set_my_commands(commands).await {
+                warn!("telegram: failed to register bot commands: {e}");
+            }
+        }
+
         // --- Startup welcome message (only shown when /init hasn't been run yet) ---
         if needs_init {
             let bot_clone = bot.clone();
@@ -340,7 +361,7 @@ async fn handle_orch_event(
     topic_icon_cache: &HashMap<String, String>,
 ) {
     match event {
-        OrchestratorEvent::TaskCreated { task_id, name, .. } => {
+        OrchestratorEvent::TaskCreated { task_id, name, initial_prompt, .. } => {
             match crate::topics::create_task_topic(bot, group_id, name).await {
                 Ok(thread_id) => {
                     let tid_i32 = thread_id.0 .0;
@@ -351,6 +372,12 @@ async fn handle_orch_event(
                     let mut ts = TelegramState::load(state_dir);
                     ts.task_topics.insert(task_id.0.clone(), tid_i32);
                     ts.save(state_dir);
+                    // Echo the initial prompt so the topic doesn't look empty.
+                    if let Some(prompt) = initial_prompt {
+                        if !prompt.is_empty() {
+                            send_text_reply(bot, group_id, Some(thread_id), prompt, None, false).await;
+                        }
+                    }
                 }
                 Err(e) => {
                     error!("telegram: failed to create topic for {task_id}: {e}");

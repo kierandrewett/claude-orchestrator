@@ -5,7 +5,8 @@ use crate::types::TaskId;
 /// A parsed slash command from any backend.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParsedCommand {
-    /// `/new <profile> <prompt>` — create a new task.
+    /// Create a new task with a profile and optional prompt.
+    /// Used by the web API and Discord; not exposed as a Telegram text command.
     New { profile: String, prompt: String },
 
     /// `/stop [task_id]` — stop the current (or specified) task.
@@ -60,17 +61,6 @@ pub fn parse(text: &str) -> Result<ParsedCommand> {
     let rest = parts.next().unwrap_or("").trim();
 
     match cmd.as_str() {
-        "/new" => {
-            let mut iter = rest.splitn(2, char::is_whitespace);
-            let profile = iter
-                .next()
-                .filter(|s| !s.is_empty())
-                .unwrap_or("base")
-                .to_string();
-            let prompt = iter.next().unwrap_or("").trim().to_string();
-            Ok(ParsedCommand::New { profile, prompt })
-        }
-
         "/stop" => {
             let task_id = if rest.is_empty() {
                 None
@@ -157,18 +147,6 @@ pub fn parse(text: &str) -> Result<ParsedCommand> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_new() {
-        let cmd = parse("/new rust fix the parser").unwrap();
-        assert_eq!(
-            cmd,
-            ParsedCommand::New {
-                profile: "rust".to_string(),
-                prompt: "fix the parser".to_string()
-            }
-        );
-    }
 
     #[test]
     fn parse_stop_no_id() {

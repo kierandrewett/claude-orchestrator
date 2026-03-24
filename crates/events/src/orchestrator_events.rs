@@ -77,6 +77,9 @@ pub enum OrchestratorEvent {
         name: String,
         profile: String,
         kind: TaskKind,
+        /// The initial prompt, if one was provided (e.g. via `/new <profile> <prompt>`).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        initial_prompt: Option<String>,
     },
 
     /// A task's state changed (Running → Hibernated, etc.).

@@ -108,7 +108,7 @@ fn print_event(ev: &OrchestratorEvent) {
             println!("[{task_id}] ✅ Done — {duration_secs:.1}s, ${:.4} ({} in / {} out)",
                 usage.total_cost_usd, usage.input_tokens, usage.output_tokens);
         }
-        OrchestratorEvent::TaskCreated { task_id, name, profile, kind } => {
+        OrchestratorEvent::TaskCreated { task_id, name, profile, kind, .. } => {
             println!("[{task_id}] 🆕 Task '{name}' created (profile={profile}, kind={kind:?})");
         }
         OrchestratorEvent::TaskStateChanged { task_id, old_state, new_state } => {

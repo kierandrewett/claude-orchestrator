@@ -517,7 +517,7 @@ impl Orchestrator {
         let (mcp_servers, disabled_mcp_servers) = self.mcp_session_args();
         let delivered = self.clients.send_to_any_client(S2C::StartSession {
             session_id,
-            initial_prompt: if prompt.is_empty() { None } else { Some(prompt) },
+            initial_prompt: if prompt.is_empty() { None } else { Some(prompt.clone()) },
             initial_files: vec![],
             extra_args: vec![],
             claude_session_id,
@@ -541,7 +541,8 @@ impl Orchestrator {
             return;
         }
 
-        self.bus.emit(OrchestratorEvent::TaskCreated { task_id, name, profile, kind });
+        let initial_prompt_opt = if prompt.is_empty() { None } else { Some(prompt) };
+        self.bus.emit(OrchestratorEvent::TaskCreated { task_id, name, profile, kind, initial_prompt: initial_prompt_opt });
         self.save_state();
     }
 
