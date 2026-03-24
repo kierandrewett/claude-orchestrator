@@ -45,6 +45,9 @@ pub struct Task {
     /// True when Claude is not currently processing a turn.
     pub claude_idle: bool,
     pub current_trigger: Option<claude_events::MessageRef>,
+    /// The Claude session UUID used for `--session-id` / `--resume`. Saved so we can
+    /// resume the conversation when a hibernated task wakes up.
+    pub claude_session_id: Option<String>,
 }
 
 impl Task {
@@ -68,6 +71,7 @@ impl Task {
             config: TaskConfig::default(),
             claude_idle: true,
             current_trigger: None,
+            claude_session_id: None,
         }
     }
 }

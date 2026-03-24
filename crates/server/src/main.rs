@@ -160,6 +160,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
                 task.usage = pt.usage;
                 task.last_activity = pt.last_activity;
                 task.created_at = pt.created_at;
+                task.claude_session_id = pt.claude_session_id;
                 registry.insert(task);
             }
         }

@@ -39,6 +39,9 @@ struct TelegramState {
     scratchpad_thread_id: Option<i32>,
     #[serde(default)]
     task_topics: std::collections::HashMap<String, i32>,
+    /// Latest conversation title per task_id (from ConversationRenamed). Persisted for /status links.
+    #[serde(default)]
+    task_titles: std::collections::HashMap<String, String>,
 }
 
 impl TelegramState {
@@ -81,6 +84,8 @@ struct TaskTopicState {
     /// The most recent bot message ID sent in this task's topic.
     /// Used as fallback reply target when trigger_ref is cleared (e.g. second turn).
     last_bot_message_id: Option<i32>,
+    /// Latest conversation title (set by ConversationRenamed). Used as link text in /status.
+    display_title: String,
 }
 
 impl TaskTopicState {
@@ -97,6 +102,7 @@ impl TaskTopicState {
             tool_group_text: String::new(),
             last_tool_start_offset: 0,
             last_bot_message_id: None,
+            display_title: String::new(),
         }
     }
 }
@@ -204,7 +210,11 @@ impl MessagingBackend for TelegramBackend {
         // Restore task topics from persisted state without probing.
         for (task_id, tid) in &persisted.task_topics {
             let thread_id = ThreadId(MessageId(*tid));
-            task_states.lock().await.insert(task_id.clone(), TaskTopicState::new(Some(thread_id)));
+            let mut state = TaskTopicState::new(Some(thread_id));
+            if let Some(title) = persisted.task_titles.get(task_id) {
+                state.display_title = title.clone();
+            }
+            task_states.lock().await.insert(task_id.clone(), state);
             thread_to_task.lock().await.insert(*tid, task_id.clone());
             info!("telegram: restored task topic thread_id={tid} for task {task_id}");
         }
@@ -701,7 +711,8 @@ async fn handle_orch_event(
             let thread_id = telegram_thread_id(trigger_ref)
                 .or_else(|| task_id.as_ref().and_then(|id| states.get(&id.0)).and_then(|s| s.thread_id));
             let reply_to = telegram_msg_id(trigger_ref);
-            send_text_reply(bot, group_id, thread_id, text, reply_to, false).await;
+            let enhanced = augment_status_with_links(text, states, group_id);
+            send_text_reply(bot, group_id, thread_id, &enhanced, reply_to, false).await;
         }
 
         OrchestratorEvent::ConversationRenamed { task_id, title } => {
@@ -712,6 +723,12 @@ async fn handle_orch_event(
                 let state = states
                     .entry(task_id.0.clone())
                     .or_insert_with(|| TaskTopicState::new(None));
+                // Track the latest title so /status can show it as the link text.
+                state.display_title = title.clone();
+                // Persist so it survives server restarts.
+                let mut ts = TelegramState::load(state_dir);
+                ts.task_titles.insert(task_id.0.clone(), title.clone());
+                ts.save(state_dir);
                 if let Some(tid) = state.thread_id {
                     let bot_clone = bot.clone();
                     let title = title.clone();
@@ -754,6 +771,76 @@ async fn handle_orch_event(
             }
         }
     }
+}
+
+/// For `/status` responses, replace task names with clickable Telegram topic links.
+/// For all other responses, HTML-escapes the text for safe sending in HTML parse mode.
+fn augment_status_with_links(
+    text: &str,
+    states: &HashMap<String, TaskTopicState>,
+    group_id: ChatId,
+) -> String {
+    use crate::formatting::escape_html;
+
+    if !text.starts_with("Tasks:") && text != "No active tasks." {
+        return escape_html(text);
+    }
+
+    // Telegram deep-link for supergroups: strip the "-100" prefix to get the channel ID.
+    let channel_id_str = group_id.0.to_string();
+    let channel_id = channel_id_str.strip_prefix("-100").unwrap_or(&channel_id_str);
+
+    // Build a map from the derived task name (as shown in /status) to (thread_id, link_label).
+    let mut name_map: HashMap<String, (i32, String)> = HashMap::new();
+    for (task_id, state) in states {
+        let Some(tid) = state.thread_id else { continue };
+        let thread_id = tid.0 .0;
+
+        // Derive the task name as build_status would use (matches t.name in the registry).
+        let name = if task_id == "scratchpad" {
+            "scratchpad".to_string()
+        } else {
+            format!("task-{}", &task_id[..8.min(task_id.len())])
+        };
+
+        // Link label: use the latest conversation title if available, else the task name.
+        let label = if state.display_title.is_empty() {
+            name.clone()
+        } else {
+            state.display_title.clone()
+        };
+
+        name_map.insert(name, (thread_id, label));
+    }
+
+    // Process line by line. Status lines have the format:
+    //   "{state_emoji} {task_name} — {profile} ({cost})"
+    let mut lines: Vec<String> = Vec::new();
+    for line in text.lines() {
+        // Split on the first " — " separator to isolate state_emoji + task_name.
+        let linked = line.splitn(2, " — ").collect::<Vec<_>>();
+        if linked.len() == 2 {
+            let left = linked[0]; // "{state_emoji} {task_name}"
+            let right = linked[1]; // "{profile} ({cost})"
+            if let Some(space) = left.find(' ') {
+                let state_emoji = &left[..space];
+                let task_name = &left[space + 1..];
+                if let Some((thread_id, label)) = name_map.get(task_name) {
+                    let url = format!("https://t.me/c/{channel_id}/{thread_id}");
+                    lines.push(format!(
+                        "{} <a href=\"{}\">{}</a> — {}",
+                        escape_html(state_emoji),
+                        url,
+                        escape_html(label),
+                        escape_html(right),
+                    ));
+                    continue;
+                }
+            }
+        }
+        lines.push(escape_html(line));
+    }
+    lines.join("\n")
 }
 
 /// Send a message, optionally replying to a specific message ID.

@@ -98,7 +98,7 @@ impl Orchestrator {
                 id: t.id.clone(),
                 name: t.name.clone(),
                 profile: t.profile.clone(),
-                claude_session_id: None,
+                claude_session_id: t.claude_session_id.clone(),
                 usage: t.usage.clone(),
                 created_at: t.created_at,
                 last_activity: t.last_activity,
@@ -289,11 +289,16 @@ impl Orchestrator {
                 }
             }
             None | Some(TaskStateSummary::Hibernated) => {
-                // Task doesn't exist or was hibernated — start a fresh session.
+                // Task doesn't exist or was hibernated — (re)start session.
                 // We use the existing task_id rather than generating a new one so
                 // backends (e.g. Telegram) that address by fixed IDs keep working.
                 let session_id = Uuid::new_v4().to_string();
-                let claude_session_id = Uuid::new_v4().to_string();
+                // Resume the previous conversation if we have the session ID, otherwise start fresh.
+                let (claude_session_id, is_resume) = self.registry
+                    .with(task_id, |t| t.claude_session_id.clone())
+                    .flatten()
+                    .map(|id| (id, true))
+                    .unwrap_or_else(|| (Uuid::new_v4().to_string(), false));
                 let (name, profile) = self.registry
                     .with(task_id, |t| (t.name.clone(), t.profile.clone()))
                     .unwrap_or_else(|| (task_id.0.clone(), self.config.docker.default_profile.clone()));
@@ -307,6 +312,7 @@ impl Orchestrator {
                 );
                 task.current_trigger = msg_ref.clone();
                 task.claude_idle = false;
+                task.claude_session_id = Some(claude_session_id.clone());
                 self.registry.insert(task);
 
                 self.bus.emit(OrchestratorEvent::PhaseChanged {
@@ -322,13 +328,14 @@ impl Orchestrator {
                 } else {
                     vec![]
                 };
+                info!("orchestrator: starting session for {task_id} (resume={is_resume})");
                 let delivered = self.clients.send_to_any_client(S2C::StartSession {
                     session_id,
                     initial_prompt: Some(text),
                     initial_files: files,
                     extra_args: vec![],
                     claude_session_id,
-                    is_resume: false,
+                    is_resume,
                     system_prompt: self.session_system_prompt(scratchpad),
                     mcp_servers,
                     disabled_mcp_servers,
@@ -491,13 +498,14 @@ impl Orchestrator {
         let claude_session_id = Uuid::new_v4().to_string();
 
         // Insert the task as Running immediately so messages can be routed.
-        let task = Task::new(
+        let mut task = Task::new(
             task_id.clone(),
             name.clone(),
             profile.clone(),
             TaskState::Running { session_id: session_id.clone() },
             kind.clone(),
         );
+        task.claude_session_id = Some(claude_session_id.clone());
         self.registry.insert(task);
 
         self.bus.emit(OrchestratorEvent::PhaseChanged {
