@@ -1,12 +1,3 @@
-# ── Stage 1: Build the React dashboard ───────────────────────────────────────
-FROM node:22-alpine AS dashboard
-WORKDIR /app
-COPY dashboard/package.json dashboard/yarn.lock* dashboard/package-lock.json* ./
-RUN npm install
-COPY dashboard/ .
-RUN npm run build
-
-# ── Stage 2: Build the Rust server ────────────────────────────────────────────
 FROM rust:1.88-slim AS server
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
@@ -24,11 +15,14 @@ COPY crates/backend-traits/Cargo.toml   ./crates/backend-traits/
 COPY crates/backend-telegram/Cargo.toml ./crates/backend-telegram/
 COPY crates/backend-discord/Cargo.toml  ./crates/backend-discord/
 COPY crates/backend-web/Cargo.toml      ./crates/backend-web/
-COPY crates/backend-stdio/Cargo.toml    ./crates/backend-stdio/
+COPY crates/backend-stdio/Cargo.toml          ./crates/backend-stdio/
+COPY crates/claude-generate-config/Cargo.toml ./crates/claude-generate-config/
+COPY crates/helper/Cargo.toml                 ./crates/helper/
 
 RUN for dir in crates/server crates/client crates/ndjson crates/events crates/containers \
         crates/orchestrator-llm crates/backend-traits crates/backend-telegram \
-        crates/backend-discord crates/backend-web crates/backend-stdio; do \
+        crates/backend-discord crates/backend-web crates/backend-stdio \
+        crates/claude-generate-config crates/helper; do \
         mkdir -p "$dir/src" && echo 'fn main() {}' > "$dir/src/main.rs"; \
     done && \
     mkdir -p crates/shared/src && echo 'pub fn dummy() {}' > crates/shared/src/lib.rs && \
@@ -48,7 +42,6 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY --from=server /app/target/release/claude-server ./
-COPY --from=dashboard /app/dist ./static
 
 VOLUME ["/app/data"]
 EXPOSE 8080
