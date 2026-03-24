@@ -290,7 +290,10 @@ impl MessagingBackend for TelegramBackend {
                     .branch(
                         Update::filter_message()
                             .branch(
-                                dptree::filter(|msg: Message| msg.from.is_some())
+                                dptree::filter(|msg: Message| {
+                                    // Ignore messages sent by bots (including our own bot's replies).
+                                    msg.from.as_ref().map_or(false, |u| !u.is_bot)
+                                })
                                     .endpoint(message_handler),
                             ),
                     )
