@@ -10,10 +10,12 @@ path = "src/main.rs"
 [dependencies]
 claude-ndjson          = { path = "../ndjson" }
 claude-events          = { path = "../events" }
+claude-shared          = { path = "../shared" }
 claude-containers      = { path = "../containers" }
 claude-orchestrator-llm = { path = "../orchestrator-llm" }
 backend-traits         = { path = "../backend-traits" }
 backend-discord        = { path = "../backend-discord" }
+backend-telegram       = { path = "../backend-telegram" }
 backend-web            = { path = "../backend-web" }
 backend-stdio          = { path = "../backend-stdio" }
 tokio                  = { version = "1", features = ["full"] }
@@ -31,6 +33,8 @@ dashmap                = "6"
 clap                   = { version = "4", features = ["derive"] }
 dirs                   = "5"
 thiserror              = "2"
+axum                   = { version = "0.7", features = ["ws"] }
+tower                  = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

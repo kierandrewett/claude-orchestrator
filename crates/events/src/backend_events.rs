@@ -35,6 +35,14 @@ pub enum BackendEvent {
         source: BackendSource,
     },
 
+    /// Cancel a specific queued message before it is delivered to Claude.
+    CancelQueuedMessage {
+        task_id: TaskId,
+        /// The MessageRef that was returned in OrchestratorEvent::MessageQueued.
+        message_ref: MessageRef,
+        source: BackendSource,
+    },
+
     /// A file upload from a user (image, PDF, attachment, …).
     FileUpload {
         task_id: TaskId,

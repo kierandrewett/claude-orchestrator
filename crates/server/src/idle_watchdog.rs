@@ -25,7 +25,7 @@ pub async fn run(registry: Arc<TaskRegistry>, bus: Arc<EventBus>, idle_hours: u6
                 if t.kind == TaskKind::Scratchpad {
                     return false;
                 }
-                if !matches!(t.state, TaskState::Running(_)) {
+                if !matches!(t.state, TaskState::Running { .. }) {
                     return false;
                 }
                 let idle = (now - t.last_activity).to_std().unwrap_or(Duration::ZERO);

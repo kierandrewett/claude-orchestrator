@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
-use claude_containers::{ContainerConfig, ContainerManager};
 use claude_events::{
     BackendEvent, EventBus, MessageRef, OrchestratorEvent, ParsedCommand, SessionPhase, TaskId,
     TaskKind, TaskStateSummary,
 };
+use claude_shared::S2C;
 
+use crate::client_registry::ClientRegistry;
 use crate::commands::{build_cost, build_status};
 use crate::config::OrchestratorConfig;
 use crate::task_manager::{Task, TaskRegistry, TaskState};
@@ -15,7 +17,8 @@ use crate::task_manager::{Task, TaskRegistry, TaskState};
 pub struct Orchestrator {
     pub bus: Arc<EventBus>,
     pub registry: Arc<TaskRegistry>,
-    pub containers: Arc<ContainerManager>,
+    pub clients: Arc<ClientRegistry>,
+    #[allow(dead_code)]
     pub config: OrchestratorConfig,
 }
 
@@ -23,53 +26,16 @@ impl Orchestrator {
     pub fn new(
         bus: Arc<EventBus>,
         registry: Arc<TaskRegistry>,
-        containers: Arc<ContainerManager>,
+        clients: Arc<ClientRegistry>,
         config: OrchestratorConfig,
     ) -> Self {
-        Self {
-            bus,
-            registry,
-            containers,
-            config,
-        }
+        Self { bus, registry, clients, config }
     }
 
     /// Run the main orchestrator loop.
     pub async fn run(self: Arc<Self>, mut backend_rx: tokio::sync::mpsc::Receiver<BackendEvent>) {
         info!("orchestrator: starting main loop");
-
         loop {
-            // Collect all running task IDs.
-            let running_ids: Vec<TaskId> = self
-                .registry
-                .all_ids()
-                .into_iter()
-                .filter(|id| {
-                    self.registry
-                        .with(id, |t| matches!(t.state, TaskState::Running(_)))
-                        .unwrap_or(false)
-                })
-                .collect();
-
-            // Poll one event from the backend channel (non-blocking).
-            if let Ok(event) = backend_rx.try_recv() {
-                self.handle_backend_event(event).await;
-                continue;
-            }
-
-            // No running tasks and no backend events — wait for a backend event.
-            if running_ids.is_empty() {
-                match backend_rx.recv().await {
-                    Some(event) => self.handle_backend_event(event).await,
-                    None => {
-                        info!("orchestrator: backend channel closed, shutting down");
-                        break;
-                    }
-                }
-                continue;
-            }
-
-            // No work — wait for a backend event.
             match backend_rx.recv().await {
                 Some(event) => self.handle_backend_event(event).await,
                 None => {
@@ -82,30 +48,14 @@ impl Orchestrator {
 
     async fn handle_backend_event(&self, event: BackendEvent) {
         match event {
-            BackendEvent::UserMessage {
-                task_id,
-                text,
-                message_ref,
-                ..
-            } => {
-                self.handle_user_message(&task_id, text, Some(message_ref))
-                    .await;
+            BackendEvent::UserMessage { task_id, text, message_ref, .. } => {
+                self.handle_user_message(&task_id, text, Some(message_ref)).await;
             }
-            BackendEvent::Command {
-                command,
-                task_id,
-                message_ref,
-                ..
-            } => {
+            BackendEvent::Command { command, task_id, message_ref, .. } => {
                 self.handle_command(command, task_id, message_ref).await;
             }
             BackendEvent::FileUpload {
-                task_id,
-                filename,
-                mime_type,
-                caption,
-                message_ref,
-                ..
+                task_id, filename, mime_type, caption, message_ref, ..
             } => {
                 let text = format!(
                     "A file was uploaded: {} ({})\n{}",
@@ -113,22 +63,45 @@ impl Orchestrator {
                     mime_type.as_deref().unwrap_or("unknown"),
                     caption.as_deref().unwrap_or("")
                 );
-                self.handle_user_message(&task_id, text, Some(message_ref))
-                    .await;
+                self.handle_user_message(&task_id, text, Some(message_ref)).await;
             }
             BackendEvent::InterruptTask { task_id, .. } => {
                 self.interrupt_task(&task_id).await;
+            }
+            BackendEvent::CancelQueuedMessage { task_id, message_ref, .. } => {
+                self.cancel_queued_message(&task_id, message_ref).await;
             }
         }
     }
 
     async fn interrupt_task(&self, task_id: &TaskId) {
         info!("orchestrator: interrupting task {task_id}");
-        // TODO: route S2C::InterruptSession to the client holding this task
-        // once client session routing is wired up.
+        let session_id = self.running_session(task_id);
+        if let Some(sid) = session_id {
+            self.clients.send_to_session(&sid, S2C::InterruptSession { session_id: sid.clone() });
+        } else {
+            warn!("orchestrator: task {task_id} is not Running, cannot interrupt");
+        }
         self.bus.emit(OrchestratorEvent::CommandResponse {
             task_id: Some(task_id.clone()),
             text: "⏹ Interrupting…".to_string(),
+            trigger_ref: None,
+        });
+    }
+
+    async fn cancel_queued_message(&self, task_id: &TaskId, message_ref: MessageRef) {
+        info!("orchestrator: cancel queued message {:?} for task {task_id}", message_ref.opaque_id);
+        let session_id = self.running_session(task_id);
+        if let Some(sid) = session_id {
+            self.clients.send_to_session(&sid, S2C::CancelQueuedInput {
+                session_id: sid.clone(),
+                message_ref_opaque_id: message_ref.opaque_id.clone(),
+            });
+        }
+        // Optimistically clear the queued indicator so backends remove the ⏰ reaction.
+        self.bus.emit(OrchestratorEvent::QueuedMessageDelivered {
+            task_id: task_id.clone(),
+            original_ref: message_ref,
         });
     }
 
@@ -138,70 +111,143 @@ impl Orchestrator {
         text: String,
         msg_ref: Option<MessageRef>,
     ) {
+        if self.clients.client_count() == 0 {
+            self.bus.emit(OrchestratorEvent::Error {
+                task_id: Some(task_id.clone()),
+                error: "No client daemon is connected.".to_string(),
+                next_steps: vec!["Start the claude-client daemon and ensure it can reach this server.".to_string()],
+                trigger_ref: msg_ref,
+            });
+            return;
+        }
+
         self.bus.emit(OrchestratorEvent::PhaseChanged {
             task_id: task_id.clone(),
             phase: SessionPhase::Acknowledged,
             trigger_message: msg_ref.clone(),
         });
 
-        self.send_to_container(task_id, text, msg_ref).await;
+        // If Claude is currently busy, the message will be queued on the client side.
+        // Emit MessageQueued so backends can react (e.g. show ⏰ reaction).
+        let claude_idle = self.registry.with(task_id, |t| t.claude_idle).unwrap_or(true);
+        if !claude_idle {
+            if let Some(ref mr) = msg_ref {
+                self.bus.emit(OrchestratorEvent::MessageQueued {
+                    task_id: task_id.clone(),
+                    message_ref: mr.clone(),
+                });
+            }
+        }
+
+        self.send_to_client(task_id, text, msg_ref).await;
     }
 
-    async fn send_to_container(
+    async fn send_to_client(
         &self,
         task_id: &TaskId,
         text: String,
         msg_ref: Option<MessageRef>,
     ) {
-        self.registry.with_mut(task_id, |t| {
-            t.claude_idle = false;
-            t.current_trigger = msg_ref;
-            t.last_activity = chrono::Utc::now();
-        });
+        let task_summary = self.registry.with(task_id, |t| t.state.summary());
 
-        self.bus.emit(OrchestratorEvent::PhaseChanged {
-            task_id: task_id.clone(),
-            phase: SessionPhase::Responding,
-            trigger_message: None,
-        });
+        match task_summary {
+            Some(TaskStateSummary::Running) => {
+                // Happy path: update state and forward the message.
+                let session_id = self.registry.with_mut(task_id, |t| {
+                    t.claude_idle = false;
+                    t.current_trigger = msg_ref.clone();
+                    t.last_activity = chrono::Utc::now();
+                    if let TaskState::Running { ref session_id } = t.state {
+                        Some(session_id.clone())
+                    } else {
+                        None
+                    }
+                }).flatten();
 
-        // The actual stdin write happens via the container handle.
-        // In the full implementation, this would write to the transport.
-        debug!("orchestrator: would send to {task_id}: {text:?}");
+                self.bus.emit(OrchestratorEvent::PhaseChanged {
+                    task_id: task_id.clone(),
+                    phase: SessionPhase::Responding,
+                    trigger_message: msg_ref.clone(),
+                });
+
+                if let Some(sid) = session_id {
+                    let message_ref_opaque_id = msg_ref.map(|r| r.opaque_id);
+                    self.clients.send_to_session(&sid, S2C::SendInput {
+                        session_id: sid.clone(),
+                        text,
+                        message_ref_opaque_id,
+                    });
+                }
+            }
+            None | Some(TaskStateSummary::Hibernated) => {
+                // Task doesn't exist or was hibernated — start a fresh session.
+                // We use the existing task_id rather than generating a new one so
+                // backends (e.g. Telegram) that address by fixed IDs keep working.
+                let session_id = Uuid::new_v4().to_string();
+                let claude_session_id = Uuid::new_v4().to_string();
+                let name = task_id.0.clone();
+
+                let mut task = Task::new(
+                    task_id.clone(),
+                    name,
+                    self.config.docker.default_profile.clone(),
+                    TaskState::Running { session_id: session_id.clone() },
+                    TaskKind::Scratchpad,
+                );
+                task.current_trigger = msg_ref.clone();
+                task.claude_idle = false;
+                self.registry.insert(task);
+
+                self.bus.emit(OrchestratorEvent::PhaseChanged {
+                    task_id: task_id.clone(),
+                    phase: SessionPhase::Starting,
+                    trigger_message: msg_ref.clone(),
+                });
+
+                let delivered = self.clients.send_to_any_client(S2C::StartSession {
+                    session_id,
+                    initial_prompt: Some(text),
+                    extra_args: vec![],
+                    claude_session_id,
+                    is_resume: false,
+                    system_prompt: self.config.server.system_prompt.clone(),
+                });
+
+                if !delivered {
+                    error!("orchestrator: no client connected for auto-created task {task_id}");
+                    self.registry.with_mut(task_id, |t| t.state = TaskState::Dead);
+                    self.bus.emit(OrchestratorEvent::Error {
+                        task_id: Some(task_id.clone()),
+                        error: "No client daemon connected.".to_string(),
+                        next_steps: vec!["Start the claude-client daemon.".to_string()],
+                        trigger_ref: msg_ref,
+                    });
+                }
+            }
+            Some(TaskStateSummary::Dead) => {
+                warn!("orchestrator: task {task_id} is Dead, dropping message");
+            }
+        }
     }
 
     async fn handle_command(
         &self,
         command: ParsedCommand,
         task_id: Option<TaskId>,
-        _msg_ref: MessageRef,
+        msg_ref: MessageRef,
     ) {
+        let trigger_ref = Some(msg_ref);
         match command {
             ParsedCommand::Status => {
                 let text = build_status(&self.registry);
-                self.bus.emit(OrchestratorEvent::CommandResponse {
-                    task_id: task_id.clone(),
-                    text,
-                });
+                self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
             }
             ParsedCommand::Cost { all } => {
                 let text = build_cost(&self.registry, all, task_id.as_ref());
-                self.bus
-                    .emit(OrchestratorEvent::CommandResponse { task_id, text });
-            }
-            ParsedCommand::ProfileList => {
-                let profiles = claude_containers::load_profiles(
-                    &std::path::PathBuf::from("docker/profiles"),
-                )
-                .unwrap_or_default();
-                let names: Vec<String> = profiles.iter().map(|p| p.name.clone()).collect();
-                self.bus.emit(OrchestratorEvent::CommandResponse {
-                    task_id,
-                    text: format!("Available profiles: {}", names.join(", ")),
-                });
+                self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
             }
             ParsedCommand::Config { key, value } => {
-                if let Some(id) = &task_id {
+                if let Some(ref id) = task_id {
                     self.registry.with_mut(id, |t| {
                         if key == "thinking" {
                             t.config.show_thinking = value == "on" || value == "true";
@@ -210,6 +256,7 @@ impl Orchestrator {
                     self.bus.emit(OrchestratorEvent::CommandResponse {
                         task_id,
                         text: format!("Config updated: {key} = {value}"),
+                        trigger_ref,
                     });
                 }
             }
@@ -227,39 +274,6 @@ impl Orchestrator {
             ParsedCommand::New { profile, prompt } => {
                 self.create_task(profile, prompt, TaskKind::Job).await;
             }
-            ParsedCommand::SlashCommands => {
-                let containers = Arc::clone(&self.containers);
-                let bus = self.bus.clone();
-                tokio::spawn(async move {
-                    let image = "orchestrator/claude-code:base";
-                    match containers.discover_slash_commands(image).await {
-                        Ok(cmds) => {
-                            let text = if cmds.is_empty() {
-                                "No slash commands found.".to_string()
-                            } else {
-                                cmds.iter()
-                                    .map(|c| {
-                                        if c.description.is_empty() {
-                                            c.name.clone()
-                                        } else {
-                                            format!("{} — {}", c.name, c.description)
-                                        }
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join("\n")
-                            };
-                            bus.emit(OrchestratorEvent::CommandResponse { task_id, text });
-                        }
-                        Err(e) => {
-                            bus.emit(OrchestratorEvent::Error {
-                                task_id,
-                                error: format!("slash command discovery failed: {e}"),
-                                next_steps: vec![],
-                            });
-                        }
-                    }
-                });
-            }
         }
     }
 
@@ -267,9 +281,11 @@ impl Orchestrator {
         let old_state = self.registry.with(task_id, |t| t.state.summary());
         if let Some(old) = old_state {
             if let Some(task) = self.registry.remove(task_id) {
-                if let TaskState::Running(handle_mutex) = task.state {
-                    let handle = handle_mutex.into_inner().unwrap_or_else(|e| e.into_inner());
-                    let _ = self.containers.destroy(&handle.container_id).await;
+                if let TaskState::Running { session_id } = task.state {
+                    self.clients.send_to_session(
+                        &session_id,
+                        S2C::KillSession { session_id: session_id.clone() },
+                    );
                 }
             }
             self.bus.emit(OrchestratorEvent::TaskStateChanged {
@@ -282,35 +298,39 @@ impl Orchestrator {
 
     pub async fn hibernate_task(&self, task_id: &TaskId) {
         if let Some(mut task) = self.registry.remove(task_id) {
-            if let TaskState::Running(handle_mutex) = task.state {
-                let handle = handle_mutex.into_inner().unwrap_or_else(|e| e.into_inner());
-                match self.containers.hibernate(handle).await {
-                    Ok(_session_data) => {
-                        task.state = TaskState::Hibernated;
-                        let id = task.id.clone();
-                        self.bus.emit(OrchestratorEvent::TaskStateChanged {
-                            task_id: id.clone(),
-                            old_state: TaskStateSummary::Running,
-                            new_state: TaskStateSummary::Hibernated,
-                        });
-                        self.registry.insert(task);
-                    }
-                    Err(e) => {
-                        error!("failed to hibernate {task_id}: {e}");
-                        task.state = TaskState::Dead;
-                        self.registry.insert(task);
-                    }
-                }
-            } else {
-                // Not running — put it back unchanged.
-                self.registry.insert(task);
+            let old_state = task.state.summary();
+            if let TaskState::Running { ref session_id } = task.state {
+                self.clients.send_to_session(
+                    session_id,
+                    S2C::KillSession { session_id: session_id.clone() },
+                );
             }
+            task.state = TaskState::Hibernated;
+            let id = task.id.clone();
+            self.bus.emit(OrchestratorEvent::TaskStateChanged {
+                task_id: id.clone(),
+                old_state,
+                new_state: TaskStateSummary::Hibernated,
+            });
+            self.registry.insert(task);
         }
     }
 
     async fn create_task(&self, profile: String, prompt: String, kind: TaskKind) {
         let task_id = TaskId::new();
         let name = format!("task-{}", &task_id.0[..8]);
+        let session_id = Uuid::new_v4().to_string();
+        let claude_session_id = Uuid::new_v4().to_string();
+
+        // Insert the task as Running immediately so messages can be routed.
+        let task = Task::new(
+            task_id.clone(),
+            name.clone(),
+            profile.clone(),
+            TaskState::Running { session_id: session_id.clone() },
+            kind.clone(),
+        );
+        self.registry.insert(task);
 
         self.bus.emit(OrchestratorEvent::PhaseChanged {
             task_id: task_id.clone(),
@@ -318,61 +338,51 @@ impl Orchestrator {
             trigger_message: None,
         });
 
-        // Build container config from profile.
-        let config = ContainerConfig {
-            image: format!(
-                "{}/{}:{}",
-                self.config.docker.image_prefix, profile, "latest"
-            ),
-            ..Default::default()
-        };
+        let delivered = self.clients.send_to_any_client(S2C::StartSession {
+            session_id,
+            initial_prompt: if prompt.is_empty() { None } else { Some(prompt) },
+            extra_args: vec![],
+            claude_session_id,
+            is_resume: false,
+            system_prompt: self.config.server.system_prompt.clone(),
+        });
 
-        match self
-            .containers
-            .spawn(config, Some(prompt), None)
-            .await
-        {
-            Ok(handle) => {
-                let task = Task::new(
-                    task_id.clone(),
-                    name.clone(),
-                    profile.clone(),
-                    TaskState::Running(Box::new(std::sync::Mutex::new(handle))),
-                    kind.clone(),
-                );
-                self.registry.insert(task);
-                self.bus.emit(OrchestratorEvent::TaskCreated {
-                    task_id,
-                    name,
-                    profile,
-                    kind,
-                });
-            }
-            Err(e) => {
-                error!("failed to create task: {e}");
-                self.bus.emit(OrchestratorEvent::Error {
-                    task_id: Some(task_id),
-                    error: format!("Failed to start container: {e}"),
-                    next_steps: vec![
-                        "Check Docker is running".to_string(),
-                        "Run `claude-orchestrator setup` to rebuild images".to_string(),
-                    ],
-                });
-            }
+        if !delivered {
+            error!("orchestrator: no client daemon connected to handle new task {task_id}");
+            self.registry.with_mut(&task_id, |t| t.state = TaskState::Dead);
+            self.bus.emit(OrchestratorEvent::Error {
+                task_id: Some(task_id.clone()),
+                error: "No client daemon connected.".to_string(),
+                next_steps: vec!["Start the claude-client daemon and ensure it is connected to the server.".to_string()],
+                trigger_ref: None,
+            });
+            return;
         }
+
+        self.bus.emit(OrchestratorEvent::TaskCreated { task_id, name, profile, kind });
+    }
+
+    /// Returns the session_id if this task is currently Running, else None.
+    fn running_session(&self, task_id: &TaskId) -> Option<String> {
+        self.registry
+            .with(task_id, |t| {
+                if let TaskState::Running { ref session_id } = t.state {
+                    Some(session_id.clone())
+                } else {
+                    None
+                }
+            })
+            .flatten()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use claude_containers::AuthManager;
     use claude_events::{BackendSource, MessageRef};
     use tokio::sync::broadcast;
     use tokio::time::{timeout, Duration};
-
     use claude_events::TaskKind;
-
     use crate::task_manager::{Task, TaskState};
 
     // ── helpers ─────────────────────────────────────────────────────────────
@@ -389,20 +399,11 @@ mod tests {
         let orch_rx = bus.subscribe_orchestrator();
         let bus = Arc::new(bus);
         let registry = Arc::new(TaskRegistry::new());
-        // bollard::Docker::connect_with_socket_defaults() doesn't open a connection
-        // until the first request, so this succeeds even when Docker isn't running.
-        let containers = Arc::new(
-            ContainerManager::new(
-                "unix:///var/run/docker.sock",
-                AuthManager::new("/tmp/test-auth".into()),
-                "/tmp".into(),
-            )
-            .unwrap(),
-        );
+        let clients = Arc::new(ClientRegistry::new());
         let orch = Arc::new(Orchestrator::new(
             Arc::clone(&bus),
             Arc::clone(&registry),
-            containers,
+            clients,
             OrchestratorConfig::default(),
         ));
         let orch_clone = Arc::clone(&orch);

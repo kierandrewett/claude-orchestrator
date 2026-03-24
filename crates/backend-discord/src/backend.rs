@@ -282,21 +282,21 @@ async fn handle_orch_event(
             }
         }
 
-        OrchestratorEvent::ToolStarted { task_id, tool_name, summary } => {
+        OrchestratorEvent::ToolStarted { task_id, tool_name, summary, .. } => {
             if let Some(tid) = thread_for(task_id, task_to_thread).await {
                 send(ctx, tid, &format_tool_started(tool_name, summary)).await;
             }
         }
 
         OrchestratorEvent::ToolCompleted {
-            task_id, tool_name, summary, is_error, output_preview,
+            task_id, tool_name, summary, is_error, output_preview, ..
         } => {
             if let Some(tid) = thread_for(task_id, task_to_thread).await {
                 send(ctx, tid, &format_tool_completed(tool_name, summary, *is_error, output_preview.as_deref())).await;
             }
         }
 
-        OrchestratorEvent::Thinking { task_id, text } => {
+        OrchestratorEvent::Thinking { task_id, text, .. } => {
             if show_thinking {
                 if let Some(tid) = thread_for(task_id, task_to_thread).await {
                     send(ctx, tid, &format_thinking(text)).await;
@@ -304,7 +304,7 @@ async fn handle_orch_event(
             }
         }
 
-        OrchestratorEvent::TurnComplete { task_id, usage, duration_secs } => {
+        OrchestratorEvent::TurnComplete { task_id, usage, duration_secs, .. } => {
             if let Some(tid) = thread_for(task_id, task_to_thread).await {
                 send(ctx, tid, &format_turn_complete(*duration_secs, usage.total_cost_usd, usage.input_tokens, usage.output_tokens)).await;
             }
@@ -321,7 +321,7 @@ async fn handle_orch_event(
             }
         }
 
-        OrchestratorEvent::Error { task_id, error, next_steps } => {
+        OrchestratorEvent::Error { task_id, error, next_steps, .. } => {
             let tid = if let Some(id) = task_id {
                 thread_for(id, task_to_thread).await
             } else {
@@ -330,7 +330,7 @@ async fn handle_orch_event(
             send(ctx, tid.unwrap_or(parent_channel), &format_error(error, next_steps)).await;
         }
 
-        OrchestratorEvent::CommandResponse { task_id, text } => {
+        OrchestratorEvent::CommandResponse { task_id, text, .. } => {
             let tid = if let Some(id) = task_id {
                 thread_for(id, task_to_thread).await
             } else {
@@ -352,7 +352,9 @@ async fn handle_orch_event(
             }
         }
 
-        OrchestratorEvent::PhaseChanged { .. } | OrchestratorEvent::QueuedMessageDelivered { .. } => {}
+        OrchestratorEvent::PhaseChanged { .. }
+        | OrchestratorEvent::QueuedMessageDelivered { .. }
+        | OrchestratorEvent::MessageQueued { .. } => {}
     }
 }
 
@@ -408,6 +410,7 @@ fn event_name(event: &OrchestratorEvent) -> &'static str {
         OrchestratorEvent::TaskStateChanged { .. } => "TaskStateChanged",
         OrchestratorEvent::Error { .. } => "Error",
         OrchestratorEvent::QueuedMessageDelivered { .. } => "QueuedMessageDelivered",
+        OrchestratorEvent::MessageQueued { .. } => "MessageQueued",
         OrchestratorEvent::FileOutput { .. } => "FileOutput",
         OrchestratorEvent::CommandResponse { .. } => "CommandResponse",
     }

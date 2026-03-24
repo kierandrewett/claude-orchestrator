@@ -1,46 +1,82 @@
+# ── Server ────────────────────────────────────────────────────────────────────
+
 [server]
+# Directory where orchestrator state (task registry, etc.) is persisted.
 state_dir = "~/.local/share/claude-orchestrator"
 
+# Address the client-daemon WebSocket server listens on.
+# Client daemons connect here to receive sessions and stream events back.
+client_bind = "0.0.0.0:8765"
+
+# Optional bearer token that client daemons must present.
+# Uncomment and set to require authentication.
+# client_token = "env:CLIENT_TOKEN"
+
+# ── Claude system prompt ──────────────────────────────────────────────────────
+# Optional text appended to the system prompt of every new Claude Code session.
+# Omit or leave commented to use Claude's default behaviour.
+# system_prompt = "You are a helpful assistant working inside a managed orchestrator."
+
+
+# ── Docker (idle watchdog only) ───────────────────────────────────────────────
+
 [docker]
-socket = "unix:///var/run/docker.sock"
-default_profile = "base"
-image_prefix = "orchestrator/claude-code"
+# Tasks are hibernated after this many hours of inactivity.
 idle_timeout_hours = 12
 
-[mounts.default]
-host = "~/dev"
-container = "/workspace"
-read_only = false
 
-[auth]
-credentials_dir = "~/.local/share/claude-orchestrator/auth"
+# ── Orchestrator LLM ──────────────────────────────────────────────────────────
+# Optional: use an LLM to help orchestrate tasks (task naming, routing, etc.).
 
 [orchestrator_llm]
-enabled = true
+enabled  = false
 provider = "openrouter"
-api_key = "env:OPENROUTER_API_KEY"
-model = "meta-llama/llama-3.1-8b-instruct"
+api_key  = "env:OPENROUTER_API_KEY"
+model    = "meta-llama/llama-3.1-8b-instruct"
 
-[backends.telegram]
-enabled = true
-bot_token = "env:TELEGRAM_BOT_TOKEN"
-supergroup_id = -100123456789
-scratchpad_topic_name = "Scratchpad"
-allowed_users = [123456789]
-voice_stt = "whisper"
-voice_stt_api_key = "env:OPENAI_API_KEY"
 
-[backends.discord]
-enabled = false
-bot_token = "env:DISCORD_BOT_TOKEN"
-guild_id = 123456789
-voice_stt = "whisper"
-voice_tts = "elevenlabs"
-voice_tts_api_key = "env:ELEVENLABS_API_KEY"
-
-[backends.web]
-enabled = true
+# ── Display ───────────────────────────────────────────────────────────────────
 
 [display]
-show_thinking = false
+# Show Claude's internal thinking blocks in backend outputs.
+show_thinking      = false
+# Coalesce streaming text chunks into fewer messages (milliseconds).
 stream_coalesce_ms = 500
+
+
+# ── Backends ──────────────────────────────────────────────────────────────────
+
+# Telegram
+# Requires a bot created via @BotFather and a supergroup with topics enabled.
+# Find your supergroup ID with @userinfobot — select "My Forum" to get the group.
+[backends.telegram]
+enabled               = true
+bot_token             = "env:TELEGRAM_BOT_TOKEN"
+# Numeric ID of the supergroup (negative, starts with -100...).
+supergroup_id         = -100123456789
+# Name of the always-on topic used as a general scratchpad.
+scratchpad_topic_name = "Scratchpad"
+# Telegram user IDs allowed to send messages. Empty list = allow everyone.
+allowed_users         = [123456789]
+# Speech-to-text provider for voice messages. Supported: "whisper". Omit to disable.
+# voice_stt         = "whisper"
+# voice_stt_api_key = "env:OPENAI_API_KEY"
+
+
+# Discord
+[backends.discord]
+enabled   = false
+bot_token = "env:DISCORD_BOT_TOKEN"
+# ID of the guild (server) where the bot operates.
+guild_id  = 123456789
+# Speech-to-text for voice. Supported: "whisper". Omit to disable.
+# voice_stt         = "whisper"
+# Text-to-speech for responses. Supported: "elevenlabs". Omit to disable.
+# voice_tts         = "elevenlabs"
+# voice_tts_api_key = "env:ELEVENLABS_API_KEY"
+
+
+# Web dashboard
+[backends.web]
+enabled = false
+# bind = "0.0.0.0:3000"

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use teloxide::prelude::*;
 use teloxide::types::ThreadId;
+use tracing::warn;
 
 /// Create a new forum topic for a task.
 pub async fn create_task_topic(bot: &Bot, group_id: ChatId, task_name: &str) -> Result<ThreadId> {
@@ -11,9 +12,27 @@ pub async fn create_task_topic(bot: &Bot, group_id: ChatId, task_name: &str) -> 
     Ok(result.thread_id)
 }
 
-/// Create or find the Scratchpad topic (creates if it doesn't exist).
+/// Create the Scratchpad topic with a pencil-and-paper emoji icon.
 pub async fn create_scratchpad_topic(bot: &Bot, group_id: ChatId, name: &str) -> Result<ThreadId> {
-    // In the full implementation, check if a topic with this name already exists.
-    // For now, just create a new one.
-    create_task_topic(bot, group_id, name).await
+    let emoji_id = find_icon_emoji_id(bot, "📝").await.unwrap_or_default();
+    let result = bot
+        .create_forum_topic(group_id, name, 0xFFD67E_u32, emoji_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("create_forum_topic failed: {e}"))?;
+    Ok(result.thread_id)
+}
+
+/// Look up the custom emoji sticker ID for a given emoji character from the
+/// set of allowed forum topic icon stickers.
+async fn find_icon_emoji_id(bot: &Bot, emoji: &str) -> Option<String> {
+    match bot.get_forum_topic_icon_stickers().await {
+        Ok(stickers) => stickers
+            .into_iter()
+            .find(|s| s.emoji.as_deref().map_or(false, |e| e.contains(emoji)))
+            .and_then(|s| s.custom_emoji_id().map(|id| id.to_owned())),
+        Err(e) => {
+            warn!("telegram: failed to fetch topic icon stickers: {e}");
+            None
+        }
+    }
 }

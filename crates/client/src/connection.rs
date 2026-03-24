@@ -78,12 +78,22 @@ async fn connect_and_run(
     config: &Arc<Config>,
     tray_state: Arc<Mutex<TrayState>>,
 ) -> anyhow::Result<()> {
-    info!("connecting to {}", config.server_url);
+    // Ensure the URL always ends with the /ws/client path.
+    let server_url = {
+        let base = config.server_url.trim_end_matches('/');
+        if base.ends_with("/ws/client") {
+            base.to_string()
+        } else {
+            format!("{base}/ws/client")
+        }
+    };
+
+    info!("connecting to {server_url}");
 
     // Build an HTTP upgrade request with the required WebSocket headers.
     // tungstenite does not inject these automatically when given a custom Request.
     let uri: tokio_tungstenite::tungstenite::http::Uri =
-        config.server_url.parse().context("invalid SERVER_URL")?;
+        server_url.parse().context("invalid SERVER_URL")?;
     let host = uri.host().unwrap_or("localhost").to_string();
     let host = match uri.port_u16() {
         Some(p) => format!("{host}:{p}"),
@@ -126,15 +136,6 @@ async fn connect_and_run(
         },
     )
     .await;
-
-    // Import any historical Claude Code sessions in the background.
-    {
-        let config_clone = Arc::clone(config);
-        let ws_tx_clone = Arc::clone(&ws_tx);
-        tokio::spawn(async move {
-            crate::history_importer::run(config_clone, ws_tx_clone).await;
-        });
-    }
 
     let session_map: SessionMap = Arc::new(TokioMutex::new(HashMap::new()));
 
@@ -227,6 +228,7 @@ async fn handle_text_message(
             ref extra_args,
             ref claude_session_id,
             is_resume,
+            ref system_prompt,
         } => {
             let sid = session_id.clone();
             info!("StartSession: session_id={sid}, is_resume={is_resume}");
@@ -249,6 +251,7 @@ async fn handle_text_message(
                 let _ = cmd_tx.try_send(S2C::SendInput {
                     session_id: sid.clone(),
                     text: text.clone(),
+                    message_ref_opaque_id: None,
                 });
             }
 
@@ -265,6 +268,7 @@ async fn handle_text_message(
                 claude_session_id: claude_session_id.clone(),
                 is_resume,
                 default_cwd: config.default_cwd.clone(),
+                system_prompt: system_prompt.clone(),
             };
 
             let ws_tx_clone = Arc::clone(ws_tx);
@@ -293,6 +297,7 @@ async fn handle_text_message(
         S2C::SendInput {
             ref session_id,
             ref text,
+            ..
         } => {
             debug!("SendInput: session_id={session_id}");
             route_to_session(session_map, session_id, msg.clone()).await;
@@ -318,14 +323,11 @@ async fn handle_text_message(
             route_to_session(session_map, session_id, msg.clone()).await;
         }
 
-        S2C::GetVmConfig { .. } | S2C::SetVmConfig { .. } | S2C::BuildImage { .. } => {
-            // VM/container mode is not supported in the native client.
+        S2C::CancelQueuedInput { ref session_id, .. } => {
+            debug!("CancelQueuedInput: session_id={session_id}");
+            route_to_session(session_map, session_id, msg.clone()).await;
         }
 
-        S2C::QueryCommands => {
-            // Slash command discovery now happens server-side inside a container.
-            // The client no longer needs a local claude binary for this.
-        }
     }
 }
 
@@ -359,8 +361,4 @@ pub async fn send_msg(ws_tx: &TokioMutex<WsSink>, msg: &C2S) {
     }
 }
 
-/// Same as send_msg but takes an Arc<TokioMutex<WsSink>> for use in spawned tasks.
-async fn ws_send(ws_tx: &Arc<TokioMutex<WsSink>>, msg: &C2S) {
-    send_msg(ws_tx, msg).await;
-}
 

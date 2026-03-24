@@ -32,6 +32,10 @@ impl Runner for NativeRunner {
             cmd.arg(arg);
         }
 
+        if let Some(ref prompt) = config.system_prompt {
+            cmd.args(["--system-prompt", prompt]);
+        }
+
         cmd.current_dir(&config.default_cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

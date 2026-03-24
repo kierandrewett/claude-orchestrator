@@ -1,18 +1,14 @@
-use std::sync::Mutex;
-
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 
-use claude_containers::ContainerHandle;
 use claude_events::{TaskId, TaskKind, TaskStateSummary};
 use claude_ndjson::UsageStats;
 
 // ── TaskState ─────────────────────────────────────────────────────────────────
 
-/// `ContainerHandle` contains `NdjsonTransport` which holds `Box<dyn AsyncRead/Write + Send>`
-/// — these are `Send` but not `Sync`. We wrap in `Mutex` so `TaskState: Send + Sync`.
 pub enum TaskState {
-    Running(Box<Mutex<ContainerHandle>>),
+    /// Task is actively running; the client holds a session with this ID.
+    Running { session_id: String },
     Hibernated,
     Dead,
 }
@@ -20,7 +16,7 @@ pub enum TaskState {
 impl TaskState {
     pub fn summary(&self) -> TaskStateSummary {
         match self {
-            TaskState::Running(_) => TaskStateSummary::Running,
+            TaskState::Running { .. } => TaskStateSummary::Running,
             TaskState::Hibernated => TaskStateSummary::Hibernated,
             TaskState::Dead => TaskStateSummary::Dead,
         }

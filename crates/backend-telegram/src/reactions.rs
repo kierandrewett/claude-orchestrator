@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
 use claude_events::SessionPhase;
+use teloxide::prelude::*;
+use teloxide::types::{MessageId, ReactionType};
+use tracing::warn;
 
 /// Tracks the current reaction per user message to avoid redundant API calls.
 pub struct ReactionTracker {
@@ -35,5 +38,30 @@ impl ReactionTracker {
 impl Default for ReactionTracker {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Apply a single emoji reaction to a message. Silently logs failures.
+pub async fn apply_reaction(bot: &Bot, chat_id: ChatId, message_id: MessageId, emoji: &str) {
+    let reaction = vec![ReactionType::Emoji {
+        emoji: emoji.to_string(),
+    }];
+    if let Err(e) = bot
+        .set_message_reaction(chat_id, message_id)
+        .reaction(reaction)
+        .await
+    {
+        warn!("telegram: set_message_reaction failed for msg {}: {e}", message_id.0);
+    }
+}
+
+/// Remove all reactions from a message (pass an empty reaction list).
+pub async fn clear_reaction(bot: &Bot, chat_id: ChatId, message_id: MessageId) {
+    if let Err(e) = bot
+        .set_message_reaction(chat_id, message_id)
+        .reaction(vec![])
+        .await
+    {
+        warn!("telegram: clear_reaction failed for msg {}: {e}", message_id.0);
     }
 }

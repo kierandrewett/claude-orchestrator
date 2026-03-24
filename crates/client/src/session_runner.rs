@@ -16,8 +16,8 @@ use crate::protocol::{AttachedFile, SessionStats, C2S, S2C};
 
 /// A message waiting to be delivered to Claude's stdin once it becomes idle.
 enum PendingMessage {
-    Text(String),
-    WithFiles { text: String, files: Vec<AttachedFile> },
+    Text { text: String, msg_ref_opaque_id: Option<String> },
+    WithFiles { text: String, files: Vec<AttachedFile>, msg_ref_opaque_id: Option<String> },
 }
 
 pub struct SessionConfig {
@@ -27,6 +27,7 @@ pub struct SessionConfig {
     pub claude_session_id: String, // pre-generated UUID for --session-id or --resume
     pub is_resume: bool,           // true = use --resume, false = use --session-id
     pub default_cwd: String,       // working directory for spawning claude
+    pub system_prompt: Option<String>,
 }
 
 /// Type alias for the write-half of a tokio-tungstenite WebSocket stream.
@@ -132,21 +133,21 @@ async fn do_run<R: Runner>(
             biased;
 
             cmd = cmd_rx.recv() => match cmd {
-                Some(S2C::SendInput { text, .. }) => {
+                Some(S2C::SendInput { text, message_ref_opaque_id, .. }) => {
                     idle_sleep.as_mut().reset(tokio::time::Instant::now() + IDLE_TIMEOUT);
                     if claude_busy {
                         info!("session {session_id}: Claude busy — queuing message ({} already queued)", queue.len());
-                        queue.push_back(PendingMessage::Text(text));
+                        queue.push_back(PendingMessage::Text { text, msg_ref_opaque_id: message_ref_opaque_id });
                     } else {
                         send_to_stdin(&mut stdin, session_id, format_user_message(&text)).await?;
                         claude_busy = true;
                     }
                 }
-                Some(S2C::SendInputWithFiles { text, files, .. }) => {
+                Some(S2C::SendInputWithFiles { text, files, message_ref_opaque_id, .. }) => {
                     idle_sleep.as_mut().reset(tokio::time::Instant::now() + IDLE_TIMEOUT);
                     if claude_busy {
                         info!("session {session_id}: Claude busy — queuing message with files ({} already queued)", queue.len());
-                        queue.push_back(PendingMessage::WithFiles { text, files });
+                        queue.push_back(PendingMessage::WithFiles { text, files, msg_ref_opaque_id: message_ref_opaque_id });
                     } else {
                         let msg = format_user_message_with_files(&text, &files).await;
                         if !msg.is_empty() {
@@ -154,6 +155,18 @@ async fn do_run<R: Runner>(
                             claude_busy = true;
                         }
                     }
+                }
+                Some(S2C::CancelQueuedInput { message_ref_opaque_id, .. }) => {
+                    let before = queue.len();
+                    queue.retain(|item| {
+                        let id = match item {
+                            PendingMessage::Text { msg_ref_opaque_id, .. } => msg_ref_opaque_id.as_deref(),
+                            PendingMessage::WithFiles { msg_ref_opaque_id, .. } => msg_ref_opaque_id.as_deref(),
+                        };
+                        id != Some(message_ref_opaque_id.as_str())
+                    });
+                    let removed = before - queue.len();
+                    info!("session {session_id}: CancelQueuedInput removed {removed} item(s) matching {message_ref_opaque_id:?}");
                 }
                 Some(S2C::KillSession { .. }) => {
                     info!("session {session_id}: KillSession — clearing queue ({} pending)", queue.len());
@@ -189,8 +202,8 @@ async fn do_run<R: Runner>(
                                 if let Some(next) = queue.pop_front() {
                                     info!("session {session_id}: turn complete — delivering queued message ({} remaining)", queue.len());
                                     let msg = match next {
-                                        PendingMessage::Text(text) => format_user_message(&text),
-                                        PendingMessage::WithFiles { text, files } => {
+                                        PendingMessage::Text { text, .. } => format_user_message(&text),
+                                        PendingMessage::WithFiles { text, files, .. } => {
                                             format_user_message_with_files(&text, &files).await
                                         }
                                     };
@@ -198,6 +211,11 @@ async fn do_run<R: Runner>(
                                         send_to_stdin(&mut stdin, session_id, msg).await?;
                                         claude_busy = true;
                                     }
+                                } else {
+                                    // Queue is empty — signal the server that Claude is idle.
+                                    ws_send(ws_tx, &C2S::ClaudeIdle {
+                                        session_id: session_id.clone(),
+                                    }).await;
                                 }
                             }
 

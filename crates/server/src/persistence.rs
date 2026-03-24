@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -6,7 +5,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
-use claude_containers::SessionData;
 use claude_events::{TaskId, TaskKind};
 use claude_ndjson::UsageStats;
 
@@ -22,14 +20,13 @@ pub struct PersistedTask {
     pub id: TaskId,
     pub name: String,
     pub profile: String,
-    pub container_id: Option<String>,
-    pub session_data: SessionData,
+    /// The Claude-generated session UUID, used to resume via --resume.
+    pub claude_session_id: Option<String>,
     pub usage: UsageStats,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
     pub state: PersistedTaskState,
     pub kind: TaskKind,
-    pub backend_channels: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

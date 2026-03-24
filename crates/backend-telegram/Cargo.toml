@@ -18,3 +18,4 @@ reqwest              = { version = "0.12", features = ["json", "multipart"] }
 async-trait          = "0.1"
 futures-util         = "0.3"
 uuid                 = { version = "1", features = ["v4", "serde"] }
+pulldown-cmark       = { version = "0.12", default-features = false }

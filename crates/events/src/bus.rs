@@ -77,6 +77,7 @@ mod tests {
         bus.emit(OrchestratorEvent::CommandResponse {
             task_id: None,
             text: "hello".to_string(),
+            trigger_ref: None,
         });
 
         let event = rx.try_recv().expect("event should be available");

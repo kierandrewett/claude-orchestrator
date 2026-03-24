@@ -25,6 +25,9 @@ pub enum OrchestratorEvent {
         text: String,
         /// `false` = start of a new message, `true` = edit the previous message.
         is_continuation: bool,
+        /// The user message that triggered this response (for reply threading).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        trigger_ref: Option<MessageRef>,
     },
 
     /// Claude started calling a tool.
@@ -32,6 +35,9 @@ pub enum OrchestratorEvent {
         task_id: TaskId,
         tool_name: String,
         summary: String,
+        /// The user message that triggered this turn (for reply threading).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        trigger_ref: Option<MessageRef>,
     },
 
     /// A tool call completed.
@@ -41,12 +47,18 @@ pub enum OrchestratorEvent {
         summary: String,
         is_error: bool,
         output_preview: Option<String>,
+        /// The user message that triggered this turn (for reply threading).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        trigger_ref: Option<MessageRef>,
     },
 
     /// Thinking/internal-monologue text (only emitted when show_thinking=true).
     Thinking {
         task_id: TaskId,
         text: String,
+        /// The user message that triggered this turn (for reply threading).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        trigger_ref: Option<MessageRef>,
     },
 
     /// A turn finished — includes usage stats and wall-clock duration.
@@ -54,6 +66,9 @@ pub enum OrchestratorEvent {
         task_id: TaskId,
         usage: UsageStats,
         duration_secs: f64,
+        /// The user message that triggered this turn (for reply threading).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        trigger_ref: Option<MessageRef>,
     },
 
     /// A new task was created.
@@ -76,6 +91,15 @@ pub enum OrchestratorEvent {
         task_id: Option<TaskId>,
         error: String,
         next_steps: Vec<String>,
+        /// The message that triggered the error, if any (for reaction/reply).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        trigger_ref: Option<MessageRef>,
+    },
+
+    /// A user message was queued because Claude is currently processing another turn.
+    MessageQueued {
+        task_id: TaskId,
+        message_ref: MessageRef,
     },
 
     /// A message that was queued mid-turn has now been delivered to Claude.
@@ -98,5 +122,8 @@ pub enum OrchestratorEvent {
     CommandResponse {
         task_id: Option<TaskId>,
         text: String,
+        /// The command message that triggered this response (for reply threading).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        trigger_ref: Option<MessageRef>,
     },
 }

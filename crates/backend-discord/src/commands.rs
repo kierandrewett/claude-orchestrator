@@ -93,15 +93,6 @@ pub async fn hibernate(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-/// List available profiles.
-#[poise::command(slash_command, guild_only)]
-pub async fn profile_list(ctx: Context<'_>) -> Result<(), Error> {
-    ctx.defer().await?;
-    dispatch(&ctx, ParsedCommand::ProfileList).await?;
-    ctx.say("Fetching profiles…").await?;
-    Ok(())
-}
-
 /// Set a config option for the current task (e.g. /config thinking on).
 #[poise::command(slash_command, guild_only)]
 pub async fn config(
@@ -116,5 +107,5 @@ pub async fn config(
 }
 
 pub fn all() -> Vec<poise::Command<Data, Error>> {
-    vec![new(), stop(), status(), cost(), hibernate(), profile_list(), config()]
+    vec![new(), stop(), status(), cost(), hibernate(), config()]
 }

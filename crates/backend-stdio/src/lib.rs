@@ -91,20 +91,20 @@ fn print_event(ev: &OrchestratorEvent) {
         OrchestratorEvent::PhaseChanged { task_id, phase, .. } => {
             println!("[{task_id}] {} Phase: {phase:?}", phase.emoji());
         }
-        OrchestratorEvent::TextOutput { task_id, text, is_continuation } => {
+        OrchestratorEvent::TextOutput { task_id, text, is_continuation, .. } => {
             if *is_continuation { print!("{text}"); } else { println!("\n[{task_id}] 💬 {text}"); }
         }
-        OrchestratorEvent::ToolStarted { task_id, tool_name, summary } => {
+        OrchestratorEvent::ToolStarted { task_id, tool_name, summary, .. } => {
             println!("[{task_id}] 🔧 {tool_name}: {summary}");
         }
         OrchestratorEvent::ToolCompleted { task_id, tool_name, is_error, output_preview, .. } => {
             let s = if *is_error { "❌" } else { "✅" };
             println!("[{task_id}] 🔧 {tool_name} → {s} {}", output_preview.as_deref().unwrap_or(""));
         }
-        OrchestratorEvent::Thinking { task_id, text } => {
+        OrchestratorEvent::Thinking { task_id, text, .. } => {
             println!("[{task_id}] 🤔 {text}");
         }
-        OrchestratorEvent::TurnComplete { task_id, usage, duration_secs } => {
+        OrchestratorEvent::TurnComplete { task_id, usage, duration_secs, .. } => {
             println!("[{task_id}] ✅ Done — {duration_secs:.1}s, ${:.4} ({} in / {} out)",
                 usage.total_cost_usd, usage.input_tokens, usage.output_tokens);
         }
@@ -114,7 +114,7 @@ fn print_event(ev: &OrchestratorEvent) {
         OrchestratorEvent::TaskStateChanged { task_id, old_state, new_state } => {
             println!("[{task_id}] {} → {}", state_emoji(old_state), state_emoji(new_state));
         }
-        OrchestratorEvent::Error { task_id, error, next_steps } => {
+        OrchestratorEvent::Error { task_id, error, next_steps, .. } => {
             let id = task_id.as_ref().map(|t| t.to_string()).unwrap_or_else(|| "—".to_string());
             eprintln!("[{id}] ❌ {error}");
             for s in next_steps { eprintln!("  • {s}"); }
@@ -122,12 +122,15 @@ fn print_event(ev: &OrchestratorEvent) {
         OrchestratorEvent::FileOutput { task_id, filename, .. } => {
             println!("[{task_id}] 📎 {filename}");
         }
-        OrchestratorEvent::CommandResponse { task_id, text } => {
+        OrchestratorEvent::CommandResponse { task_id, text, .. } => {
             let id = task_id.as_ref().map(|t| t.to_string()).unwrap_or_else(|| "—".to_string());
             println!("[{id}] ℹ️  {text}");
         }
         OrchestratorEvent::QueuedMessageDelivered { task_id, .. } => {
             println!("[{task_id}] 📥 Queued message delivered");
+        }
+        OrchestratorEvent::MessageQueued { task_id, .. } => {
+            println!("[{task_id}] ⏰ Message queued (Claude is busy)");
         }
     }
 }

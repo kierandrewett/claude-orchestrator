@@ -20,14 +20,8 @@ pub enum ParsedCommand {
     /// `/hibernate` — hibernate the current task.
     Hibernate,
 
-    /// `/profile list` — list available profiles.
-    ProfileList,
-
     /// `/config <key> <value>` — update a task config option.
     Config { key: String, value: String },
-
-    /// `/slash-commands` — list Claude slash commands (discovered inside a container).
-    SlashCommands,
 }
 
 /// Parse a text string beginning with `/` into a `ParsedCommand`.
@@ -38,7 +32,13 @@ pub fn parse(text: &str) -> Result<ParsedCommand> {
     }
 
     let mut parts = text.splitn(2, char::is_whitespace);
-    let cmd = parts.next().unwrap_or("").to_lowercase();
+    let raw_cmd = parts.next().unwrap_or("");
+    // Telegram appends @BotName to commands in groups (e.g. /status@MyBot).
+    let cmd = raw_cmd
+        .split('@')
+        .next()
+        .unwrap_or(raw_cmd)
+        .to_lowercase();
     let rest = parts.next().unwrap_or("").trim();
 
     match cmd.as_str() {
@@ -68,14 +68,6 @@ pub fn parse(text: &str) -> Result<ParsedCommand> {
 
         "/hibernate" => Ok(ParsedCommand::Hibernate),
 
-        "/profile" => {
-            if rest.trim() == "list" {
-                Ok(ParsedCommand::ProfileList)
-            } else {
-                bail!("unknown profile sub-command '{}'; try '/profile list'", rest)
-            }
-        }
-
         "/config" => {
             let mut iter = rest.splitn(2, char::is_whitespace);
             let key = iter
@@ -91,8 +83,6 @@ pub fn parse(text: &str) -> Result<ParsedCommand> {
                 .to_string();
             Ok(ParsedCommand::Config { key, value })
         }
-
-        "/slash-commands" => Ok(ParsedCommand::SlashCommands),
 
         other => bail!("unknown command '{}'", other),
     }
@@ -141,11 +131,6 @@ mod tests {
     fn parse_cost_all() {
         assert_eq!(parse("/cost all").unwrap(), ParsedCommand::Cost { all: true });
         assert_eq!(parse("/cost").unwrap(), ParsedCommand::Cost { all: false });
-    }
-
-    #[test]
-    fn parse_profile_list() {
-        assert_eq!(parse("/profile list").unwrap(), ParsedCommand::ProfileList);
     }
 
     #[test]

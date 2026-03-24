@@ -94,6 +94,9 @@ impl MessagingBackend for WebBackend {
 
         let app = api_router(api_state)
             .route("/ws", get(ws_handler))
+            .route("/", get(|| async { axum::response::Html(
+                "<h1>Claude Orchestrator</h1><p>API: <code>/api/tasks</code> &mdash; WebSocket: <code>/ws</code></p>"
+            )}))
             .layer(tower_http::cors::CorsLayer::permissive());
 
         let bind = self.bind.clone();

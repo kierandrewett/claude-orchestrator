@@ -39,25 +39,7 @@ pub struct SessionInfo {
     pub claude_session_id: Option<String>, // Claude's own session UUID
 }
 
-// ── Slash command discovery ────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SlashCommand {
-    pub name: String,
-    pub description: String,
-}
-
 // ── Wire protocol ──────────────────────────────────────────────────────────────
-
-/// One historical Claude Code conversation, imported from ~/.claude/projects/.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HistoricalSession {
-    pub claude_session_id: String,
-    pub cwd: String,
-    pub events: Vec<serde_json::Value>, // user + assistant lines only
-    pub created_at: Option<DateTime<Utc>>,
-    pub ended_at: Option<DateTime<Utc>>,
-}
 
 /// Client daemon → Server
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,105 +65,11 @@ pub enum C2S {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-    CommandList {
-        commands: Vec<SlashCommand>,
+    /// Signal from the client that Claude is idle (no turn in progress) and
+    /// the queue is empty.  The server uses this to reset the claude_idle flag.
+    ClaudeIdle {
+        session_id: String,
     },
-    ImportHistory {
-        sessions: Vec<HistoricalSession>,
-    },
-    /// Response to GetVmConfig — carries the current VM config.
-    VmConfig {
-        request_id: String,
-        config: VmConfigProto,
-    },
-    /// Ack for SetVmConfig (or error response for GetVmConfig when no config exists).
-    VmConfigAck {
-        request_id: String,
-        success: bool,
-        error: Option<String>,
-    },
-    /// Streaming log line from an in-progress BuildImage.
-    BuildImageLog {
-        request_id: String,
-        line: String,
-    },
-    /// Final result of a BuildImage request.
-    BuildImageResult {
-        request_id: String,
-        success: bool,
-        error: Option<String>,
-    },
-}
-
-// ── VM config wire types ───────────────────────────────────────────────────────
-
-/// A single directory mount for the microVM.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VolumeMountProto {
-    pub name: String,
-    pub host_path: String,
-    pub guest_path: String,
-    #[serde(default = "default_size_gb")]
-    pub size_gb: u32,
-    #[serde(default)]
-    pub excludes: Vec<String>,
-}
-
-fn default_size_gb() -> u32 {
-    20
-}
-
-/// Which Alpine packages to install in the rootfs.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ToolsConfigProto {
-    #[serde(default)]
-    pub extra_packages: Vec<String>,
-}
-
-/// Wire-safe representation of the client's container config.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VmConfigProto {
-    pub enabled: bool,
-    pub network_enabled: bool,
-    /// Docker image tag to use (and build) for sessions.
-    #[serde(default = "default_image")]
-    pub image: String,
-    /// Base image for the generated Dockerfile (FROM line).
-    #[serde(default = "default_base_image")]
-    pub base_image: String,
-    pub data_dir: String,
-    pub mounts: Vec<VolumeMountProto>,
-    pub tools: ToolsConfigProto,
-}
-
-fn default_image() -> String {
-    "claude-code:latest".to_string()
-}
-
-fn default_base_image() -> String {
-    "alpine:latest".to_string()
-}
-
-impl Default for VmConfigProto {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            network_enabled: true,
-            image: default_image(),
-            base_image: default_base_image(),
-            data_dir: String::new(),
-            mounts: Vec::new(),
-            tools: ToolsConfigProto::default(),
-        }
-    }
-}
-
-/// Response type used by AppState for pending VM config requests.
-#[derive(Debug)]
-pub enum VmConfigResponse {
-    Config(VmConfigProto),
-    Ack { success: bool, error: Option<String> },
-    BuildResult { success: bool, error: Option<String> },
 }
 
 /// A file attached to a message, transferred from the Telegram bot to the client
@@ -206,10 +94,16 @@ pub enum S2C {
         extra_args: Vec<String>,
         claude_session_id: String, // pre-generated UUID for --session-id or --resume
         is_resume: bool,           // true = use --resume, false = use --session-id
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_prompt: Option<String>,
     },
     SendInput {
         session_id: String,
         text: String,
+        /// Opaque backend message ID, forwarded so the client can match
+        /// a CancelQueuedInput against items waiting in its queue.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_ref_opaque_id: Option<String>,
     },
     /// Like SendInput but carries attached files (images, PDFs, other) to be
     /// forwarded to Claude as multimodal content blocks.
@@ -218,6 +112,8 @@ pub enum S2C {
         /// The message text / caption (may be empty if attachment-only).
         text: String,
         files: Vec<AttachedFile>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_ref_opaque_id: Option<String>,
     },
     KillSession {
         session_id: String,
@@ -227,19 +123,12 @@ pub enum S2C {
     InterruptSession {
         session_id: String,
     },
-    QueryCommands, // server requests client to fetch slash commands
-    /// Request client to return its current VM config.
-    GetVmConfig {
-        request_id: String,
-    },
-    /// Push an updated VM config to the client to save.
-    SetVmConfig {
-        request_id: String,
-        config: VmConfigProto,
-    },
-    /// Ask the client to (re)build the Docker image from its Dockerfile.
-    BuildImage {
-        request_id: String,
+    /// Cancel a specific queued message before it is delivered to Claude.
+    /// Matches by the opaque_id of the MessageRef that was returned in
+    /// OrchestratorEvent::MessageQueued.
+    CancelQueuedInput {
+        session_id: String,
+        message_ref_opaque_id: String,
     },
 }
 
@@ -294,9 +183,6 @@ pub enum S2D {
     ClientStatus {
         connected: bool,
         hostname: Option<String>,
-    },
-    CommandList {
-        commands: Vec<SlashCommand>,
     },
     Error {
         message: String,

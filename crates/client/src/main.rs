@@ -1,5 +1,4 @@
 mod connection;
-mod history_importer;
 mod protocol;
 mod runner;
 mod session_runner;
@@ -10,6 +9,8 @@ use tracing::info;
 use tray::TrayState;
 
 fn main() -> anyhow::Result<()> {
+    check_prerequisites();
+
     // When running without a terminal (e.g. systemd/autostart), default to
     // "warn" to keep logs quiet.  An explicit RUST_LOG always takes precedence.
     let log_level = if atty::is(atty::Stream::Stderr) {
@@ -97,6 +98,7 @@ fn main() -> anyhow::Result<()> {
     ctrlc::set_handler(move || {
         info!("signal received, shutting down");
         let _ = shutdown_tx_signal.send(());
+        std::process::exit(0);
     })
     .ok();
 
@@ -135,6 +137,44 @@ fn main() -> anyhow::Result<()> {
 
     info!("daemon exiting");
     Ok(())
+}
+
+/// Verify that `claude` is installed and the user is logged in.
+/// Prints a clear error message and exits if either check fails.
+fn check_prerequisites() {
+    // 1. Check the binary is on PATH.
+    if which::which("claude").is_err() {
+        eprintln!(
+            "\x1b[1;31merror:\x1b[0m `claude` not found on PATH.\n\
+             \n\
+             Install Claude Code first:\n\
+             \n\
+             \x1b[1m  npm install -g @anthropic-ai/claude-code\x1b[0m\n\
+             \n\
+             Then log in:\n\
+             \n\
+             \x1b[1m  claude login\x1b[0m"
+        );
+        std::process::exit(1);
+    }
+
+    // 2. Check that credentials exist (~/.claude/.credentials.json).
+    let creds = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/"))
+        .join(".claude")
+        .join(".credentials.json");
+
+    if !creds.exists() {
+        eprintln!(
+            "\x1b[1;31merror:\x1b[0m Claude credentials not found at {}.\n\
+             \n\
+             Log in to Claude Code before starting the client daemon:\n\
+             \n\
+             \x1b[1m  claude login\x1b[0m",
+            creds.display()
+        );
+        std::process::exit(1);
+    }
 }
 
 /// Reads an existing client-id from disk, or generates and persists a new one.

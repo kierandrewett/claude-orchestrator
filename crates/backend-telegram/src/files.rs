@@ -20,18 +20,23 @@ pub async fn download_file(bot: &Bot, file_id: &str) -> Result<Vec<u8>> {
 }
 
 /// Send a file as a document.
+///
+/// Note: `message_thread_id` is not supported in multipart requests by teloxide 0.10.
+/// Instead, pass `reply_to_message_id` to a message already in the target topic —
+/// Telegram will automatically place the document in the same thread.
 pub async fn send_document(
     bot: &Bot,
     chat_id: ChatId,
-    thread_id: Option<teloxide::types::ThreadId>,
+    reply_to_message_id: Option<i32>,
     data: Arc<Vec<u8>>,
     filename: &str,
     caption: Option<&str>,
 ) -> Result<()> {
     let file = InputFile::memory((*data).clone()).file_name(filename.to_string());
     let mut req = bot.send_document(chat_id, file);
-    if let Some(tid) = thread_id {
-        req = req.message_thread_id(tid);
+    if let Some(reply_id) = reply_to_message_id {
+        use teloxide::types::{MessageId, ReplyParameters};
+        req = req.reply_parameters(ReplyParameters::new(MessageId(reply_id)));
     }
     if let Some(cap) = caption {
         req = req.caption(cap);

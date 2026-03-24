@@ -105,12 +105,12 @@ impl SessionPhase {
     pub fn emoji(&self) -> &'static str {
         match self {
             SessionPhase::Acknowledged => "👀",
-            SessionPhase::Starting => "🏗️",
-            SessionPhase::ToolUse => "🔧",
+            SessionPhase::Starting => "⚡",
+            SessionPhase::ToolUse => "👨‍💻",
             SessionPhase::Thinking => "🤔",
-            SessionPhase::Responding => "💬",
-            SessionPhase::Complete => "✅",
-            SessionPhase::Error => "❌",
+            SessionPhase::Responding => "✍️",
+            SessionPhase::Complete => "👍",
+            SessionPhase::Error => "🤬",
         }
     }
 }
