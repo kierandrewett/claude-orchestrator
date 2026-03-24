@@ -30,6 +30,7 @@ atty              = "0.2"
 base64            = "0.22"
 toml              = "0.8"
 which             = "6"
+reqwest           = { version = "0.12", features = ["json", "blocking"] }
 libc              = "0.2"
 tempfile          = "3"
 # tray-icon is used on all platforms; disable the libxdo default feature so we

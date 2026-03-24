@@ -73,17 +73,13 @@ impl Runner for NativeRunner {
         for (k, v) in &config.mcp_extra_env {
             mcp_env.insert(k.clone(), serde_json::Value::String(v.clone()));
         }
-        // Resolve the helper binary: prefer a sibling in the same directory as
-        // this client binary (works for both cargo target dirs and installed
-        // locations), fall back to PATH lookup.
+        // Use this binary itself as the MCP helper — it handles the `mcp`
+        // subcommand directly, so no separate helper binary is required.
         let helper_cmd = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("claude-orchestrator-helper")))
-            .filter(|p| p.exists())
             .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| {
-                warn!("claude-orchestrator-helper not found alongside client binary, falling back to PATH");
-                "claude-orchestrator-helper".to_string()
+            .unwrap_or_else(|_| {
+                warn!("could not resolve current_exe, falling back to claude-client on PATH");
+                "claude-client".to_string()
             });
 
         info!(helper = %helper_cmd, config = %mcp_config_path, "writing MCP config");
