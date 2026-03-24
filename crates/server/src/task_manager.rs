@@ -38,6 +38,7 @@ pub struct Task {
     pub profile: String,
     pub state: TaskState,
     pub usage: UsageStats,
+    pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
     pub kind: TaskKind,
     pub config: TaskConfig,
@@ -54,13 +55,15 @@ impl Task {
         state: TaskState,
         kind: TaskKind,
     ) -> Self {
+        let now = Utc::now();
         Self {
             id,
             name,
             profile,
             state,
             usage: UsageStats::default(),
-            last_activity: Utc::now(),
+            created_at: now,
+            last_activity: now,
             kind,
             config: TaskConfig::default(),
             claude_idle: true,

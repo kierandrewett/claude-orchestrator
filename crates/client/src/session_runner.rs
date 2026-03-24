@@ -23,6 +23,7 @@ enum PendingMessage {
 pub struct SessionConfig {
     pub session_id: String,
     pub initial_prompt: Option<String>,
+    pub initial_files: Vec<crate::protocol::AttachedFile>,
     pub extra_args: Vec<String>,
     pub claude_session_id: String, // pre-generated UUID for --session-id or --resume
     pub is_resume: bool,           // true = use --resume, false = use --session-id
@@ -97,7 +98,11 @@ async fn do_run<R: Runner>(
     // Claude is considered busy as soon as we send the initial prompt.
     // If there's no initial prompt it starts idle, waiting for the first message.
     let mut claude_busy = if let Some(ref prompt) = config.initial_prompt {
-        let msg = format_user_message(prompt);
+        let msg = if config.initial_files.is_empty() {
+            format_user_message(prompt)
+        } else {
+            format_user_message_with_files(prompt, &config.initial_files).await
+        };
         log_ndjson_out(session_id, &msg);
         stdin
             .write_all(msg.as_bytes())

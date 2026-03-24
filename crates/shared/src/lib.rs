@@ -96,6 +96,8 @@ pub enum S2C {
         is_resume: bool,           // true = use --resume, false = use --session-id
         #[serde(default, skip_serializing_if = "Option::is_none")]
         system_prompt: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        initial_files: Vec<AttachedFile>,
     },
     SendInput {
         session_id: String,

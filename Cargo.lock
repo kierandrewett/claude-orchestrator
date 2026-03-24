@@ -681,6 +681,7 @@ dependencies = [
  "backend-telegram",
  "backend-traits",
  "backend-web",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "claude-containers",

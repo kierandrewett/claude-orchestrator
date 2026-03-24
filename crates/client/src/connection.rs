@@ -229,6 +229,7 @@ async fn handle_text_message(
             ref claude_session_id,
             is_resume,
             ref system_prompt,
+            ref initial_files,
         } => {
             let sid = session_id.clone();
             info!("StartSession: session_id={sid}, is_resume={is_resume}");
@@ -244,15 +245,23 @@ async fn handle_text_message(
                 map.insert(sid.clone(), cmd_tx.clone());
             }
 
-            // Pre-queue the initial prompt as a SendInput so it's delivered
-            // through the normal select loop, not written to stdin before the
-            // container's stdin attachment is established.
+            // Pre-queue the initial prompt as a SendInput/SendInputWithFiles so it's
+            // delivered through the normal select loop.
             if let Some(ref text) = initial_prompt {
-                let _ = cmd_tx.try_send(S2C::SendInput {
-                    session_id: sid.clone(),
-                    text: text.clone(),
-                    message_ref_opaque_id: None,
-                });
+                if initial_files.is_empty() {
+                    let _ = cmd_tx.try_send(S2C::SendInput {
+                        session_id: sid.clone(),
+                        text: text.clone(),
+                        message_ref_opaque_id: None,
+                    });
+                } else {
+                    let _ = cmd_tx.try_send(S2C::SendInputWithFiles {
+                        session_id: sid.clone(),
+                        text: text.clone(),
+                        files: initial_files.clone(),
+                        message_ref_opaque_id: None,
+                    });
+                }
             }
 
             // Increment active session count
@@ -264,6 +273,7 @@ async fn handle_text_message(
             let session_cfg = SessionConfig {
                 session_id: sid.clone(),
                 initial_prompt: None, // delivered via cmd channel above
+                initial_files: vec![],
                 extra_args: extra_args.clone(),
                 claude_session_id: claude_session_id.clone(),
                 is_resume,

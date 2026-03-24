@@ -18,9 +18,31 @@ fn tool_emoji(tool_name: &str) -> &'static str {
     }
 }
 
+/// For the Agent tool, extract the display name (subagent_type if present) and detail text.
+fn agent_display(summary: &str) -> (String, String) {
+    let val: serde_json::Value = serde_json::from_str(summary).unwrap_or_default();
+    let subagent_type = val
+        .get("subagent_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Agent")
+        .to_string();
+    let description = val
+        .get("description")
+        .or_else(|| val.get("prompt"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(summary);
+    let truncated: String = description.chars().take(300).collect();
+    let detail = format!("<code>   ❯ {}</code>", escape_html(&truncated));
+    (subagent_type, detail)
+}
+
 /// Format a tool_started event.
 pub fn format_tool_started(tool_name: &str, summary: &str) -> String {
     let emoji = tool_emoji(tool_name);
+    if tool_name == "Agent" {
+        let (subagent_type, detail) = agent_display(summary);
+        return format!("{} <b>{}</b>\n{}", emoji, escape_html(&subagent_type), detail);
+    }
     let detail = tool_detail(tool_name, summary);
     format!("{} <b>{}</b>\n{}", emoji, escape_html(tool_name), detail)
 }
@@ -34,7 +56,12 @@ pub fn format_tool_completed(
 ) -> String {
     let emoji = tool_emoji(tool_name);
     let status = if is_error { "❌" } else { "✅" };
-    let detail = tool_detail(tool_name, summary);
+    let (display_name, detail) = if tool_name == "Agent" {
+        let (subagent_type, d) = agent_display(summary);
+        (subagent_type, d)
+    } else {
+        (tool_name.to_string(), tool_detail(tool_name, summary))
+    };
     let preview_str = preview
         .filter(|p| !p.is_empty())
         .map(|p| {
@@ -52,7 +79,7 @@ pub fn format_tool_completed(
             format!("\n<code>{}</code>", escape_html(&truncated))
         })
         .unwrap_or_default();
-    format!("{} {} <b>{}</b>\n{}{}", status, emoji, escape_html(tool_name), detail, preview_str)
+    format!("{} {} <b>{}</b>\n{}{}", status, emoji, escape_html(&display_name), detail, preview_str)
 }
 
 /// Extract the most meaningful field from a tool's JSON input for display.

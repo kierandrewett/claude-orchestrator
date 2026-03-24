@@ -32,7 +32,7 @@ idle_timeout_hours = 12
 enabled  = false
 provider = "openrouter"
 api_key  = "env:OPENROUTER_API_KEY"
-model    = "meta-llama/llama-3.1-8b-instruct"
+model    = "openai/gpt-4o-mini"
 
 
 # ── Display ───────────────────────────────────────────────────────────────────

@@ -20,6 +20,7 @@ pub struct Orchestrator {
     pub clients: Arc<ClientRegistry>,
     #[allow(dead_code)]
     pub config: OrchestratorConfig,
+    pub store: Arc<crate::persistence::StateStore>,
 }
 
 impl Orchestrator {
@@ -28,8 +29,31 @@ impl Orchestrator {
         registry: Arc<TaskRegistry>,
         clients: Arc<ClientRegistry>,
         config: OrchestratorConfig,
+        store: Arc<crate::persistence::StateStore>,
     ) -> Self {
-        Self { bus, registry, clients, config }
+        Self { bus, registry, clients, config, store }
+    }
+
+    fn save_state(&self) {
+        use crate::persistence::{PersistedState, PersistedTask, PersistedTaskState};
+        let tasks = self.registry.all_ids().into_iter().filter_map(|id| {
+            self.registry.with(&id, |t| PersistedTask {
+                id: t.id.clone(),
+                name: t.name.clone(),
+                profile: t.profile.clone(),
+                claude_session_id: None,
+                usage: t.usage.clone(),
+                created_at: t.created_at,
+                last_activity: t.last_activity,
+                state: match t.state {
+                    crate::task_manager::TaskState::Running { .. } => PersistedTaskState::Hibernated,
+                    crate::task_manager::TaskState::Hibernated => PersistedTaskState::Hibernated,
+                    crate::task_manager::TaskState::Dead => PersistedTaskState::Dead,
+                },
+                kind: t.kind.clone(),
+            })
+        }).collect();
+        self.store.save(&PersistedState { tasks });
     }
 
     /// Run the main orchestrator loop.
@@ -55,15 +79,20 @@ impl Orchestrator {
                 self.handle_command(command, task_id, message_ref).await;
             }
             BackendEvent::FileUpload {
-                task_id, filename, mime_type, caption, message_ref, ..
+                task_id, filename, data, mime_type, caption, message_ref, ..
             } => {
-                let text = format!(
-                    "A file was uploaded: {} ({})\n{}",
+                use base64::{engine::general_purpose::STANDARD, Engine as _};
+                let file = claude_shared::AttachedFile {
+                    mime_type: mime_type.unwrap_or_else(|| "application/octet-stream".to_string()),
+                    data_base64: STANDARD.encode(&*data),
                     filename,
-                    mime_type.as_deref().unwrap_or("unknown"),
-                    caption.as_deref().unwrap_or("")
-                );
-                self.handle_user_message(&task_id, text, Some(message_ref)).await;
+                };
+                self.handle_user_message_with_files(
+                    &task_id,
+                    caption.unwrap_or_default(),
+                    vec![file],
+                    Some(message_ref),
+                ).await;
             }
             BackendEvent::InterruptTask { task_id, .. } => {
                 self.interrupt_task(&task_id).await;
@@ -111,6 +140,16 @@ impl Orchestrator {
         text: String,
         msg_ref: Option<MessageRef>,
     ) {
+        self.handle_user_message_with_files(task_id, text, vec![], msg_ref).await;
+    }
+
+    async fn handle_user_message_with_files(
+        &self,
+        task_id: &TaskId,
+        text: String,
+        files: Vec<claude_shared::AttachedFile>,
+        msg_ref: Option<MessageRef>,
+    ) {
         if self.clients.client_count() == 0 {
             self.bus.emit(OrchestratorEvent::Error {
                 task_id: Some(task_id.clone()),
@@ -127,8 +166,6 @@ impl Orchestrator {
             trigger_message: msg_ref.clone(),
         });
 
-        // If Claude is currently busy, the message will be queued on the client side.
-        // Emit MessageQueued so backends can react (e.g. show ⏰ reaction).
         let claude_idle = self.registry.with(task_id, |t| t.claude_idle).unwrap_or(true);
         if !claude_idle {
             if let Some(ref mr) = msg_ref {
@@ -139,13 +176,14 @@ impl Orchestrator {
             }
         }
 
-        self.send_to_client(task_id, text, msg_ref).await;
+        self.send_to_client(task_id, text, files, msg_ref).await;
     }
 
     async fn send_to_client(
         &self,
         task_id: &TaskId,
         text: String,
+        files: Vec<claude_shared::AttachedFile>,
         msg_ref: Option<MessageRef>,
     ) {
         let task_summary = self.registry.with(task_id, |t| t.state.summary());
@@ -172,11 +210,20 @@ impl Orchestrator {
 
                 if let Some(sid) = session_id {
                     let message_ref_opaque_id = msg_ref.map(|r| r.opaque_id);
-                    self.clients.send_to_session(&sid, S2C::SendInput {
-                        session_id: sid.clone(),
-                        text,
-                        message_ref_opaque_id,
-                    });
+                    if files.is_empty() {
+                        self.clients.send_to_session(&sid, S2C::SendInput {
+                            session_id: sid.clone(),
+                            text,
+                            message_ref_opaque_id,
+                        });
+                    } else {
+                        self.clients.send_to_session(&sid, S2C::SendInputWithFiles {
+                            session_id: sid.clone(),
+                            text,
+                            files,
+                            message_ref_opaque_id,
+                        });
+                    }
                 }
             }
             None | Some(TaskStateSummary::Hibernated) => {
@@ -185,12 +232,14 @@ impl Orchestrator {
                 // backends (e.g. Telegram) that address by fixed IDs keep working.
                 let session_id = Uuid::new_v4().to_string();
                 let claude_session_id = Uuid::new_v4().to_string();
-                let name = task_id.0.clone();
+                let (name, profile) = self.registry
+                    .with(task_id, |t| (t.name.clone(), t.profile.clone()))
+                    .unwrap_or_else(|| (task_id.0.clone(), self.config.docker.default_profile.clone()));
 
                 let mut task = Task::new(
                     task_id.clone(),
                     name,
-                    self.config.docker.default_profile.clone(),
+                    profile,
                     TaskState::Running { session_id: session_id.clone() },
                     TaskKind::Scratchpad,
                 );
@@ -207,6 +256,7 @@ impl Orchestrator {
                 let delivered = self.clients.send_to_any_client(S2C::StartSession {
                     session_id,
                     initial_prompt: Some(text),
+                    initial_files: files,
                     extra_args: vec![],
                     claude_session_id,
                     is_resume: false,
@@ -260,6 +310,11 @@ impl Orchestrator {
                     });
                 }
             }
+            ParsedCommand::Cancel => {
+                if let Some(id) = task_id {
+                    self.interrupt_task(&id).await;
+                }
+            }
             ParsedCommand::Stop { task_id: stop_id } => {
                 let id = stop_id.or(task_id);
                 if let Some(id) = id {
@@ -293,6 +348,7 @@ impl Orchestrator {
                 old_state: old,
                 new_state: TaskStateSummary::Dead,
             });
+            self.save_state();
         }
     }
 
@@ -313,6 +369,7 @@ impl Orchestrator {
                 new_state: TaskStateSummary::Hibernated,
             });
             self.registry.insert(task);
+            self.save_state();
         }
     }
 
@@ -341,6 +398,7 @@ impl Orchestrator {
         let delivered = self.clients.send_to_any_client(S2C::StartSession {
             session_id,
             initial_prompt: if prompt.is_empty() { None } else { Some(prompt) },
+            initial_files: vec![],
             extra_args: vec![],
             claude_session_id,
             is_resume: false,
@@ -360,6 +418,7 @@ impl Orchestrator {
         }
 
         self.bus.emit(OrchestratorEvent::TaskCreated { task_id, name, profile, kind });
+        self.save_state();
     }
 
     /// Returns the session_id if this task is currently Running, else None.
@@ -400,11 +459,13 @@ mod tests {
         let bus = Arc::new(bus);
         let registry = Arc::new(TaskRegistry::new());
         let clients = Arc::new(ClientRegistry::new());
+        let store = Arc::new(crate::persistence::StateStore::new(std::path::Path::new("/tmp")));
         let orch = Arc::new(Orchestrator::new(
             Arc::clone(&bus),
             Arc::clone(&registry),
             clients,
             OrchestratorConfig::default(),
+            store,
         ));
         let orch_clone = Arc::clone(&orch);
         tokio::spawn(async move { orch_clone.run(backend_rx).await });

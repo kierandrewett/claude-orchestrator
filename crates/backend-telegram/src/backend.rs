@@ -21,7 +21,7 @@ use crate::reactions::{apply_reaction, clear_reaction, ReactionTracker};
 use crate::streaming::StreamingState;
 
 /// Configuration for the Telegram backend.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TelegramConfig {
     pub bot_token: String,
     pub supergroup_id: i64,
@@ -30,11 +30,14 @@ pub struct TelegramConfig {
     pub voice_stt_api_key: Option<String>,
     pub show_thinking: bool,
     pub state_dir: std::path::PathBuf,
+    pub llm: Option<std::sync::Arc<claude_orchestrator_llm::OrchestratorLlm>>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
 struct TelegramState {
     scratchpad_thread_id: Option<i32>,
+    #[serde(default)]
+    task_topics: std::collections::HashMap<String, i32>,
 }
 
 impl TelegramState {
@@ -75,6 +78,8 @@ struct TaskTopicState {
     /// The most recent bot message ID sent in this task's topic.
     /// Used as fallback reply target when trigger_ref is cleared (e.g. second turn).
     last_bot_message_id: Option<i32>,
+    /// Number of turns completed — used to trigger first-turn topic rename.
+    turns_completed: u32,
 }
 
 impl TaskTopicState {
@@ -90,6 +95,7 @@ impl TaskTopicState {
             tool_group_text: String::new(),
             last_tool_start_offset: 0,
             last_bot_message_id: None,
+            turns_completed: 0,
         }
     }
 }
@@ -158,6 +164,14 @@ impl MessagingBackend for TelegramBackend {
         } else {
             true
         };
+
+        // Restore task topics from persisted state without probing.
+        for (task_id, tid) in &persisted.task_topics {
+            let thread_id = ThreadId(MessageId(*tid));
+            task_states.lock().await.insert(task_id.clone(), TaskTopicState::new(Some(thread_id)));
+            thread_to_task.lock().await.insert(*tid, task_id.clone());
+            info!("telegram: restored task topic thread_id={tid} for task {task_id}");
+        }
 
         info!("telegram: backend started for group {group_id}");
 
@@ -261,7 +275,7 @@ impl MessagingBackend for TelegramBackend {
 
             let mut states = task_states.lock().await;
             let mut t2t = thread_to_task.lock().await;
-            handle_orch_event(&bot, group_id, &event, &mut states, &mut t2t).await;
+            handle_orch_event(&bot, group_id, &event, &mut states, &mut t2t, &state_dir, self.config.llm.clone()).await;
         }
     }
 }
@@ -272,6 +286,8 @@ async fn handle_orch_event(
     event: &OrchestratorEvent,
     states: &mut HashMap<String, TaskTopicState>,
     thread_to_task: &mut HashMap<i32, String>,
+    state_dir: &std::path::Path,
+    llm: Option<std::sync::Arc<claude_orchestrator_llm::OrchestratorLlm>>,
 ) {
     match event {
         OrchestratorEvent::TaskCreated { task_id, name, .. } => {
@@ -281,6 +297,10 @@ async fn handle_orch_event(
                     states.insert(task_id.0.clone(), TaskTopicState::new(Some(thread_id)));
                     thread_to_task.insert(tid_i32, task_id.0.clone());
                     info!("telegram: created topic {tid_i32} for task {task_id}");
+                    // Persist the thread→task mapping so it survives reboots.
+                    let mut ts = TelegramState::load(state_dir);
+                    ts.task_topics.insert(task_id.0.clone(), tid_i32);
+                    ts.save(state_dir);
                 }
                 Err(e) => {
                     error!("telegram: failed to create topic for {task_id}: {e}");
@@ -295,18 +315,16 @@ async fn handle_orch_event(
             trigger_message,
         } => {
             if let Some(msg_ref) = trigger_message {
-                if msg_ref.backend == "telegram" {
-                    if let Ok(msg_id) = msg_ref.opaque_id.parse::<i32>() {
-                        // Track which message is currently being processed.
-                        if *phase == SessionPhase::Responding {
-                            let state = states
-                                .entry(task_id.0.clone())
-                                .or_insert_with(|| TaskTopicState::new(None));
-                            state.processing_msg_id = Some(msg_id);
-                        }
-                        // Apply emoji reaction for the current phase.
-                        apply_reaction(bot, group_id, MessageId(msg_id), phase.emoji()).await;
+                if let Some(msg_id) = parse_telegram_msg_id(&msg_ref.backend, &msg_ref.opaque_id) {
+                    // Track which message is currently being processed.
+                    if *phase == SessionPhase::Responding {
+                        let state = states
+                            .entry(task_id.0.clone())
+                            .or_insert_with(|| TaskTopicState::new(None));
+                        state.processing_msg_id = Some(msg_id);
                     }
+                    // Apply emoji reaction for the current phase.
+                    apply_reaction(bot, group_id, MessageId(msg_id), phase.emoji()).await;
                 }
             }
         }
@@ -315,19 +333,15 @@ async fn handle_orch_event(
             task_id,
             message_ref,
         } => {
-            if message_ref.backend == "telegram" {
-                if let Ok(msg_id) = message_ref.opaque_id.parse::<i32>() {
-                    let state = states
-                        .entry(task_id.0.clone())
-                        .or_insert_with(|| TaskTopicState::new(None));
-                    // Track the queued message so we can handle ❌ reactions later.
-                    state
-                        .queued_messages
-                        .push((msg_id, message_ref.clone()));
-                    // Apply 🤔 reaction to let the user know their message is queued.
-                    apply_reaction(bot, group_id, MessageId(msg_id), "🤔").await;
-                    debug!("telegram: applied 🤔 reaction to queued message {msg_id}");
-                }
+            if let Some(msg_id) = parse_telegram_msg_id(&message_ref.backend, &message_ref.opaque_id) {
+                let state = states
+                    .entry(task_id.0.clone())
+                    .or_insert_with(|| TaskTopicState::new(None));
+                // Track the queued message so we can handle ❌ reactions later.
+                state.queued_messages.push((msg_id, message_ref.clone()));
+                // Apply 🤔 reaction to let the user know their message is queued.
+                apply_reaction(bot, group_id, MessageId(msg_id), "🤔").await;
+                debug!("telegram: applied 🤔 reaction to queued message {msg_id}");
             }
         }
 
@@ -511,6 +525,34 @@ async fn handle_orch_event(
             let last_raw = state.streaming.current_text.clone();
             state.streaming.reset();
 
+            // On the first turn, generate a title and rename the topic.
+            if state.turns_completed == 0 && !last_raw.is_empty() {
+                if let Some(tid) = thread_id {
+                    let bot_clone = bot.clone();
+                    let response_preview = last_raw.chars().take(600).collect::<String>();
+                    let llm_clone = llm.clone();
+                    tokio::spawn(async move {
+                        let title = if let Some(llm) = llm_clone {
+                            llm.suggest_title(&response_preview).await
+                        } else {
+                            // Fallback: first non-empty line truncated to 60 chars.
+                            let line = response_preview.trim().lines().next().unwrap_or("")
+                                .trim_start_matches('#').trim();
+                            let t: String = line.chars().take(60).collect();
+                            if t.len() == 60 { t.rsplit_once(' ').map(|(s,_)| s.to_string()).unwrap_or(t) } else { t }
+                        };
+                        if title.is_empty() { return; }
+                        use teloxide::prelude::Requester;
+                        if let Err(e) = bot_clone.edit_forum_topic(group_id, tid).name(title.clone()).await {
+                            warn!("telegram: failed to rename topic {:?}: {e}", tid);
+                        } else {
+                            info!("telegram: renamed topic {:?} to '{title}'", tid);
+                        }
+                    });
+                }
+            }
+            state.turns_completed += 1;
+
             if let Some(msg_id) = last_msg_id {
                 use teloxide::prelude::Requester;
                 let last_html = md_to_telegram_html(&last_raw);
@@ -537,15 +579,13 @@ async fn handle_orch_event(
             original_ref,
         } => {
             // The queued message was delivered to Claude — remove ⏰ reaction.
-            if original_ref.backend == "telegram" {
-                if let Ok(msg_id) = original_ref.opaque_id.parse::<i32>() {
-                    let state = states
-                        .entry(task_id.0.clone())
-                        .or_insert_with(|| TaskTopicState::new(None));
-                    state.queued_messages.retain(|(id, _)| *id != msg_id);
-                    clear_reaction(bot, group_id, MessageId(msg_id)).await;
-                    debug!("telegram: cleared ⏰ reaction from delivered message {msg_id}");
-                }
+            if let Some(msg_id) = parse_telegram_msg_id(&original_ref.backend, &original_ref.opaque_id) {
+                let state = states
+                    .entry(task_id.0.clone())
+                    .or_insert_with(|| TaskTopicState::new(None));
+                state.queued_messages.retain(|(id, _)| *id != msg_id);
+                clear_reaction(bot, group_id, MessageId(msg_id)).await;
+                debug!("telegram: cleared ⏰ reaction from delivered message {msg_id}");
             }
         }
 
@@ -611,10 +651,10 @@ async fn handle_orch_event(
             text,
             trigger_ref,
         } => {
-            let thread_id = task_id
-                .as_ref()
-                .and_then(|id| states.get(&id.0))
-                .and_then(|s| s.thread_id);
+            // Prefer thread from the trigger_ref (covers commands from any topic),
+            // fall back to the task's own topic.
+            let thread_id = telegram_thread_id(trigger_ref)
+                .or_else(|| task_id.as_ref().and_then(|id| states.get(&id.0)).and_then(|s| s.thread_id));
             let reply_to = telegram_msg_id(trigger_ref);
             send_text_reply(bot, group_id, thread_id, text, reply_to, false).await;
         }
@@ -651,11 +691,29 @@ async fn send_text_reply(
     }
 }
 
-/// Extract a Telegram message ID from a MessageRef, if it belongs to the telegram backend.
+/// Extract a Telegram message ID from a MessageRef.
+/// opaque_id format: "{thread_id}/{msg_id}" or "{msg_id}" (legacy).
 fn telegram_msg_id(msg_ref: &Option<MessageRef>) -> Option<i32> {
+    msg_ref.as_ref().and_then(|r| parse_telegram_msg_id(&r.backend, &r.opaque_id))
+}
+
+/// Parse message ID from a raw (backend, opaque_id) pair.
+fn parse_telegram_msg_id(backend: &str, opaque_id: &str) -> Option<i32> {
+    if backend == "telegram" {
+        opaque_id.split('/').last()?.parse::<i32>().ok()
+    } else {
+        None
+    }
+}
+
+/// Extract the Telegram thread ID encoded in a MessageRef, if present.
+fn telegram_thread_id(msg_ref: &Option<MessageRef>) -> Option<ThreadId> {
     msg_ref.as_ref().and_then(|r| {
         if r.backend == "telegram" {
-            r.opaque_id.parse::<i32>().ok()
+            let mut parts = r.opaque_id.splitn(2, '/');
+            let first = parts.next()?;
+            parts.next()?; // ensure there IS a second part
+            first.parse::<i32>().ok().map(|tid| ThreadId(MessageId(tid)))
         } else {
             None
         }
@@ -684,8 +742,12 @@ async fn handle_incoming(
 
     let user_id = from.id.0.to_string();
     let source = BackendSource::new("telegram", &user_id);
-    let msg_id = msg.id.0.to_string();
-    let msg_ref = MessageRef::new("telegram", &msg_id);
+    // Encode thread_id into the opaque_id so CommandResponse can route back to the right topic.
+    // Format: "{thread_id}/{msg_id}" when in a thread, "{msg_id}" for main chat.
+    let msg_ref = match msg.thread_id {
+        Some(tid) => MessageRef::new("telegram", &format!("{}/{}", tid.0.0, msg.id.0)),
+        None => MessageRef::new("telegram", &msg.id.0.to_string()),
+    };
 
     // Handle /init before anything else — it's backend-local, not routed to the orchestrator.
     if msg.text() == Some("/init") {
@@ -701,7 +763,9 @@ async fn handle_incoming(
                         "scratchpad".to_string(),
                         TaskTopicState::new(Some(thread_id)),
                     );
-                    TelegramState { scratchpad_thread_id: Some(tid_i32) }.save(state_dir);
+                    let mut ts = TelegramState::load(state_dir);
+                    ts.scratchpad_thread_id = Some(tid_i32);
+                    ts.save(state_dir);
                     {
                         use teloxide::prelude::Requester;
                         use teloxide::types::ParseMode;
@@ -731,48 +795,187 @@ async fn handle_incoming(
         return;
     }
 
-    // Only handle messages in known threads (scratchpad or task topics).
-    // Ignore messages in the main group chat or unregistered topics.
-    let task_id_str = match msg.thread_id {
-        Some(tid) => {
-            let t2t = thread_to_task.lock().await;
-            match t2t.get(&tid.0 .0).cloned() {
-                Some(id) => id,
-                None => return, // unknown topic — ignore
-            }
-        }
-        None => return, // main group chat — ignore
+    // Look up the task_id for this thread — may be None for unlinked/main-chat topics.
+    let task_id: Option<TaskId> = match msg.thread_id {
+        Some(tid) => thread_to_task.lock().await.get(&tid.0.0).cloned().map(TaskId),
+        None => None,
     };
-
-    let task_id = TaskId(task_id_str);
 
     if let Some(text) = msg.text() {
         if text.starts_with('/') {
+            // Handle /reconnect locally — links an unlinked topic to a task.
+            let lower = text.trim().to_lowercase();
+            let cmd_word = lower.split_whitespace().next().unwrap_or("");
+            let cmd_word = cmd_word.split('@').next().unwrap_or(cmd_word);
+            if cmd_word == "/reconnect" {
+                if let Some(tid) = msg.thread_id {
+                    let tid_i32 = tid.0.0;
+                    let arg = text.trim().splitn(2, char::is_whitespace).nth(1).unwrap_or("").trim();
+                    if arg.is_empty() {
+                        send_text_reply(&bot, group_id, msg.thread_id,
+                            "Usage: <code>/reconnect &lt;task_id&gt;</code>\n\nFind task IDs with <code>/status</code>.",
+                            Some(msg.id.0), false).await;
+                    } else {
+                        thread_to_task.lock().await.insert(tid_i32, arg.to_string());
+                        task_states.lock().await
+                            .entry(arg.to_string())
+                            .or_insert_with(|| TaskTopicState::new(msg.thread_id));
+                        let mut ts = TelegramState::load(state_dir);
+                        ts.task_topics.insert(arg.to_string(), tid_i32);
+                        ts.save(state_dir);
+                        send_text_reply(&bot, group_id, msg.thread_id,
+                            &format!("✅ Topic reconnected to task <code>{}</code>.", arg),
+                            Some(msg.id.0), false).await;
+                        info!("telegram: reconnected thread {tid_i32} → task {arg}");
+                    }
+                } else {
+                    send_text_reply(&bot, group_id, None,
+                        "❓ /reconnect only works from inside a topic.", Some(msg.id.0), false).await;
+                }
+                return;
+            }
+
+            // Handle /rename locally — renames the current Telegram topic.
+            if cmd_word == "/rename" {
+                let new_name = text.trim().splitn(2, char::is_whitespace).nth(1).unwrap_or("").trim();
+                if new_name.is_empty() {
+                    send_text_reply(&bot, group_id, msg.thread_id,
+                        "Usage: <code>/rename &lt;new name&gt;</code>",
+                        Some(msg.id.0), false).await;
+                } else if let Some(tid) = msg.thread_id {
+                    use teloxide::prelude::Requester;
+                    match bot.edit_forum_topic(group_id, tid).name(new_name).await {
+                        Ok(_) => {
+                            info!("telegram: renamed topic {:?} to '{new_name}'", tid);
+                        }
+                        Err(e) => {
+                            warn!("telegram: /rename failed: {e}");
+                            send_text_reply(&bot, group_id, msg.thread_id,
+                                &format!("❌ Failed to rename topic: {e}"),
+                                Some(msg.id.0), false).await;
+                        }
+                    }
+                } else {
+                    send_text_reply(&bot, group_id, None,
+                        "❓ /rename only works from inside a topic.", Some(msg.id.0), false).await;
+                }
+                return;
+            }
+
+            // All other slash commands are routed to the orchestrator from any topic.
             match claude_events::parse_command(text) {
                 Ok(cmd) => {
                     let _ = sender
                         .send(BackendEvent::Command {
                             command: cmd,
-                            task_id: Some(task_id),
+                            task_id,
                             message_ref: msg_ref,
                             source,
                         })
                         .await;
                 }
                 Err(_) => {
-                    // Unknown slash command — don't forward to Claude.
                     debug!("telegram: ignoring unknown command: {text}");
                 }
             }
-        } else {
-            let _ = sender
-                .send(BackendEvent::UserMessage {
-                    task_id,
-                    text: text.to_string(),
-                    message_ref: msg_ref,
-                    source,
-                })
-                .await;
+            return;
+        }
+
+        // Regular text message — requires a linked task.
+        match task_id {
+            Some(tid) => {
+                let _ = sender
+                    .send(BackendEvent::UserMessage {
+                        task_id: tid,
+                        text: text.to_string(),
+                        message_ref: msg_ref,
+                        source,
+                    })
+                    .await;
+            }
+            None => {
+                // Only show hint for messages in topics, not main chat.
+                if msg.thread_id.is_some() {
+                    send_text_reply(&bot, group_id, msg.thread_id,
+                        "❓ This topic isn't linked to any task.\n\nUse <code>/reconnect &lt;task_id&gt;</code> to link it, or <code>/status</code> to see tasks.",
+                        Some(msg.id.0), false).await;
+                }
+            }
+        }
+        return;
+    }
+
+    // Handle photo messages.
+    if let Some(photos) = msg.photo() {
+        // Use the highest-resolution photo size.
+        if let Some(photo) = photos.last() {
+            let file_id = photo.file.id.clone();
+            let caption = msg.caption().map(|s| s.to_string());
+            handle_file_upload(
+                &bot, group_id, sender, task_id, msg_ref, source, msg.thread_id,
+                file_id, format!("photo_{}.jpg", photo.file.unique_id),
+                Some("image/jpeg".to_string()), caption,
+            ).await;
+        }
+        return;
+    }
+
+    // Handle document/file messages.
+    if let Some(doc) = msg.document() {
+        let file_id = doc.file.id.clone();
+        let filename = doc.file_name.clone().unwrap_or_else(|| "document".to_string());
+        let mime_type = doc.mime_type.as_ref().map(|m| m.to_string());
+        let caption = msg.caption().map(|s| s.to_string());
+        handle_file_upload(
+            &bot, group_id, sender, task_id, msg_ref, source, msg.thread_id,
+            file_id, filename, mime_type, caption,
+        ).await;
+        return;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_file_upload(
+    bot: &Bot,
+    group_id: ChatId,
+    sender: mpsc::Sender<BackendEvent>,
+    task_id: Option<TaskId>,
+    msg_ref: MessageRef,
+    source: BackendSource,
+    thread_id: Option<ThreadId>,
+    file_id: String,
+    filename: String,
+    mime_type: Option<String>,
+    caption: Option<String>,
+) {
+    let tid = match task_id {
+        Some(t) => t,
+        None => {
+            if thread_id.is_some() {
+                send_text_reply(bot, group_id, thread_id,
+                    "❓ This topic isn't linked to any task.",
+                    None, false).await;
+            }
+            return;
+        }
+    };
+
+    match crate::files::download_file(bot, &file_id).await {
+        Ok(data) => {
+            let _ = sender.send(BackendEvent::FileUpload {
+                task_id: tid,
+                filename,
+                data: std::sync::Arc::new(data),
+                mime_type,
+                caption,
+                message_ref: msg_ref,
+                source,
+            }).await;
+        }
+        Err(e) => {
+            warn!("telegram: failed to download file {file_id}: {e}");
+            send_text_reply(bot, group_id, thread_id,
+                "❌ Failed to download the file.", None, false).await;
         }
     }
 }
@@ -843,10 +1046,10 @@ async fn handle_reaction(
     }
 }
 
-/// Returns true if the reaction list contains the ❌ cancel emoji.
+/// Returns true if the reaction list contains a cancel emoji (❌ or 👎).
 fn is_cancel_reaction(reactions: &[ReactionType]) -> bool {
     reactions.iter().any(|r| match r {
-        ReactionType::Emoji { emoji } => emoji == "❌",
+        ReactionType::Emoji { emoji } => emoji == "❌" || emoji == "👎",
         _ => false,
     })
 }

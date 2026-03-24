@@ -20,6 +20,10 @@ impl OrchestratorLlm {
         }
     }
 
+    pub fn config(&self) -> &OrchestratorLlmConfig {
+        &self.config
+    }
+
     /// Interpret a voice transcript into a structured command.
     ///
     /// If the LLM is disabled or returns an unparseable response, falls back to
@@ -130,6 +134,72 @@ When in doubt, use passthrough. Respond ONLY with the JSON object, no other text
                 Ok(self.keyword_fallback(transcript, context))
             }
         }
+    }
+
+    /// Generate a short topic title from the beginning of a Claude response.
+    ///
+    /// Falls back to extracting the first meaningful line when the LLM is
+    /// disabled or unavailable.
+    pub async fn suggest_title(&self, response_preview: &str) -> String {
+        let fallback = || {
+            let text = response_preview.trim();
+            let first_line = text.lines().next().unwrap_or(text);
+            let clean: String = first_line.trim_start_matches('#').trim().chars().take(60).collect();
+            // Trim to a word boundary if we hit the limit.
+            if clean.len() == 60 {
+                clean.rsplit_once(' ').map(|(s, _)| s.to_string()).unwrap_or(clean)
+            } else {
+                clean
+            }
+        };
+
+        if !self.config.enabled {
+            return fallback();
+        }
+        let api_key = match &self.config.api_key {
+            Some(k) => k.clone(),
+            None => return fallback(),
+        };
+
+        let preview: String = response_preview.chars().take(600).collect();
+        let model = self.config.model.as_deref().unwrap_or("meta-llama/llama-3.1-8b-instruct");
+        let url = self.config.base_url.as_deref().unwrap_or(OPENROUTER_URL);
+
+        let body = json!({
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Generate a short title (3-6 words, max 50 characters) for a chat thread based on this assistant message. Reply with ONLY the title — no quotes, no punctuation at the end."
+                },
+                {"role": "user", "content": preview}
+            ],
+            "max_tokens": 32,
+            "temperature": 0.3,
+        });
+
+        let resp = match self.client.post(url).bearer_auth(&api_key).json(&body).send().await {
+            Ok(r) => r,
+            Err(e) => { warn!("suggest_title: request failed: {e}"); return fallback(); }
+        };
+        if !resp.status().is_success() {
+            warn!("suggest_title: API returned {}", resp.status());
+            return fallback();
+        }
+        let resp_json: serde_json::Value = match resp.json().await {
+            Ok(j) => j,
+            Err(e) => { warn!("suggest_title: parse error: {e}"); return fallback(); }
+        };
+        let title = resp_json
+            .pointer("/choices/0/message/content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .trim_matches('"')
+            .trim()
+            .to_string();
+
+        if title.is_empty() || title.len() > 128 { fallback() } else { title }
     }
 
     /// Simple keyword-based fallback when LLM is disabled or unavailable.

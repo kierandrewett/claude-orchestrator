@@ -81,7 +81,26 @@ async fn run(config_path: PathBuf) -> Result<()> {
 
     // Load persisted state.
     match store.load() {
-        Ok(state) => info!("loaded {} persisted tasks", state.tasks.len()),
+        Ok(state) => {
+            info!("loaded {} persisted tasks", state.tasks.len());
+            for pt in state.tasks {
+                use crate::persistence::PersistedTaskState;
+                if matches!(pt.state, PersistedTaskState::Dead) {
+                    continue;
+                }
+                let mut task = task_manager::Task::new(
+                    pt.id,
+                    pt.name,
+                    pt.profile,
+                    task_manager::TaskState::Hibernated,
+                    pt.kind,
+                );
+                task.usage = pt.usage;
+                task.last_activity = pt.last_activity;
+                task.created_at = pt.created_at;
+                registry.insert(task);
+            }
+        }
         Err(e) => warn!("failed to load state: {e}"),
     }
 
@@ -104,6 +123,17 @@ async fn run(config_path: PathBuf) -> Result<()> {
     if let Some(ref tg_cfg) = config.backends.telegram {
         if tg_cfg.enabled {
             use backend_telegram::backend::TelegramConfig as TgConfig;
+            let llm = {
+                use claude_orchestrator_llm::{OrchestratorLlm, OrchestratorLlmConfig};
+                let llm_cfg = OrchestratorLlmConfig {
+                    enabled: config.orchestrator_llm.enabled,
+                    provider: config.orchestrator_llm.provider.clone(),
+                    api_key: config.orchestrator_llm.api_key.clone(),
+                    model: config.orchestrator_llm.model.clone(),
+                    base_url: None,
+                };
+                std::sync::Arc::new(OrchestratorLlm::new(llm_cfg))
+            };
             let tg_backend = backend_telegram::TelegramBackend::new(TgConfig {
                 bot_token: tg_cfg.bot_token.clone(),
                 supergroup_id: tg_cfg.supergroup_id,
@@ -112,6 +142,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
                 voice_stt_api_key: tg_cfg.voice_stt_api_key.clone(),
                 show_thinking: config.display.show_thinking,
                 state_dir: state_dir.clone(),
+                llm: Some(llm),
             });
             let orch_rx = bus.subscribe_orchestrator();
             let tx = backend_sender.clone();
@@ -224,6 +255,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
         Arc::clone(&registry),
         Arc::clone(&client_registry),
         config,
+        Arc::clone(&store),
     ));
 
     // Handle Ctrl-C / SIGTERM.

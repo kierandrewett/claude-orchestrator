@@ -20,6 +20,9 @@ pub enum ParsedCommand {
     /// `/hibernate` — hibernate the current task.
     Hibernate,
 
+    /// `/cancel` — interrupt the current Claude response (SIGINT), keeps session alive.
+    Cancel,
+
     /// `/config <key> <value>` — update a task config option.
     Config { key: String, value: String },
 }
@@ -67,6 +70,8 @@ pub fn parse(text: &str) -> Result<ParsedCommand> {
         "/cost" => Ok(ParsedCommand::Cost { all: rest == "all" }),
 
         "/hibernate" => Ok(ParsedCommand::Hibernate),
+
+        "/cancel" => Ok(ParsedCommand::Cancel),
 
         "/config" => {
             let mut iter = rest.splitn(2, char::is_whitespace);

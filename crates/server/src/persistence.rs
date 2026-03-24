@@ -45,6 +45,17 @@ impl StateStore {
         }
     }
 
+    pub fn save(&self, state: &PersistedState) {
+        match serde_json::to_string_pretty(state) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&self.path, json) {
+                    error!("persistence: failed to save state: {e}");
+                }
+            }
+            Err(e) => error!("persistence: failed to serialize state: {e}"),
+        }
+    }
+
     pub fn load(&self) -> Result<PersistedState> {
         if !self.path.exists() {
             return Ok(PersistedState::default());
