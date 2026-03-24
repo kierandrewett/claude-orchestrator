@@ -127,19 +127,24 @@ impl MessagingBackend for TelegramBackend {
         let state_dir = self.config.state_dir.clone();
         let hidden_tools = self.config.hidden_tools.clone();
 
-        // Fetch available forum topic icon emojis and announce them to the orchestrator
-        // so the MCP helper can constrain Claude to valid emoji choices.
-        {
+        // Fetch available forum topic icon emojis, cache their sticker IDs, and
+        // announce the allowed emoji list to the orchestrator so the MCP helper
+        // can constrain Claude to valid emoji choices.
+        let topic_icon_cache: HashMap<String, String> = {
             use teloxide::prelude::Requester;
             match bot.get_forum_topic_icon_stickers().await {
                 Ok(stickers) => {
-                    let emojis: Vec<String> = stickers
+                    let map: HashMap<String, String> = stickers
                         .iter()
-                        .filter_map(|s| s.emoji.clone())
+                        .filter_map(|s| {
+                            let emoji = s.emoji.clone()?;
+                            let id = s.custom_emoji_id()?.to_owned();
+                            Some((emoji, id))
+                        })
                         .collect();
-                    if !emojis.is_empty() {
-                        let emoji_str = emojis.join(",");
-                        info!("telegram: announcing {} allowed topic emojis", emojis.len());
+                    if !map.is_empty() {
+                        let emoji_str = map.keys().cloned().collect::<Vec<_>>().join(",");
+                        info!("telegram: announcing {} allowed topic emojis", map.len());
                         let mut mcp_env = std::collections::HashMap::new();
                         mcp_env.insert("ORCHESTRATOR_ALLOWED_EMOJIS".to_string(), emoji_str);
                         let _ = backend_sender.send(BackendEvent::BackendCapabilities {
@@ -147,10 +152,14 @@ impl MessagingBackend for TelegramBackend {
                             mcp_env,
                         }).await;
                     }
+                    map
                 }
-                Err(e) => warn!("telegram: failed to fetch topic icon stickers: {e}"),
+                Err(e) => {
+                    warn!("telegram: failed to fetch topic icon stickers: {e}");
+                    HashMap::new()
+                }
             }
-        }
+        };
 
         // Load persisted state.
         let persisted = TelegramState::load(&state_dir);
@@ -302,7 +311,7 @@ impl MessagingBackend for TelegramBackend {
 
             let mut states = task_states.lock().await;
             let mut t2t = thread_to_task.lock().await;
-            handle_orch_event(&bot, group_id, &event, &mut states, &mut t2t, &state_dir, &hidden_tools).await;
+            handle_orch_event(&bot, group_id, &event, &mut states, &mut t2t, &state_dir, &hidden_tools, &topic_icon_cache).await;
         }
     }
 }
@@ -315,6 +324,7 @@ async fn handle_orch_event(
     thread_to_task: &mut HashMap<i32, String>,
     state_dir: &std::path::Path,
     hidden_tools: &[String],
+    topic_icon_cache: &HashMap<String, String>,
 ) {
     match event {
         OrchestratorEvent::TaskCreated { task_id, name, .. } => {
@@ -448,6 +458,13 @@ async fn handle_orch_event(
             }
             state.pending_tool_hidden = false;
 
+            // If no current tool group message exists, we're starting fresh — clear any
+            // stale content from a previous turn that wasn't cleared by TextOutput
+            // (happens when a turn starts directly with a tool, not text).
+            if state.streaming.current_tool_message_id.is_none() {
+                state.tool_group_text.clear();
+            }
+
             let entry = format_tool_started(tool_name, summary);
 
             // Append to the tool group, recording where this entry starts so
@@ -476,9 +493,7 @@ async fn handle_orch_event(
                     warn!("telegram: tool group edit failed (msg {msg_id}): {e}");
                 }
             } else {
-                // Send new tool group message.
-                let group_text = state.tool_group_text.clone();
-                let msg_id = send_text_reply(bot, group_id, thread_id, &group_text, reply_to, true).await;
+                let msg_id = send_text_reply(bot, group_id, thread_id, &entry, reply_to, true).await;
                 if let Some(id) = msg_id {
                     state.streaming.current_tool_message_id = Some(id);
                     state.last_bot_message_id = Some(id);
@@ -516,17 +531,19 @@ async fn handle_orch_event(
 
             if let Some(msg_id) = state.streaming.current_tool_message_id {
                 use teloxide::prelude::Requester;
-                if let Err(e) = bot
+                match bot
                     .edit_message_text(group_id, MessageId(msg_id), &group_text)
                     .parse_mode(teloxide::types::ParseMode::Html)
                     .await
                 {
-                    warn!("telegram: tool edit failed (msg {msg_id}): {e}");
-                    send_text_reply(bot, group_id, thread_id, &completed_entry, None, true).await;
+                    Ok(_) => {}
+                    Err(e) if e.to_string().contains("MESSAGE_NOT_MODIFIED") => {}
+                    Err(e) => {
+                        warn!("telegram: tool edit failed (msg {msg_id}): {e}");
+                    }
                 }
             } else {
                 warn!("telegram: ToolCompleted has no tool_message_id for task {}", task_id.0);
-                send_text_reply(bot, group_id, thread_id, &completed_entry, None, true).await;
             }
         }
 
@@ -564,14 +581,16 @@ async fn handle_orch_event(
             // Append duration to the last response message.
             let last_msg_id = state.streaming.current_message_id;
             let last_raw = state.streaming.current_text.clone();
+            let last_tool_msg_id = state.streaming.current_tool_message_id;
+            let tool_group_text = state.tool_group_text.clone();
             state.streaming.reset();
 
             if let Some(msg_id) = last_msg_id {
+                // Normal case: append to the last text message.
                 use teloxide::prelude::Requester;
                 let last_html = md_to_telegram_html(&last_raw);
                 let edited = format!("{last_html}\n{stats}");
                 if edited.len() > 4096 {
-                    // Too long to edit — append stats as a separate reply.
                     let reply_to = Some(msg_id);
                     send_text_reply(bot, group_id, thread_id, &stats, reply_to, false).await;
                 } else if let Err(_) = bot.edit_message_text(group_id, MessageId(msg_id), &edited)
@@ -579,6 +598,19 @@ async fn handle_orch_event(
                     .await
                 {
                     let reply_to = telegram_msg_id(trigger_ref);
+                    send_text_reply(bot, group_id, thread_id, &stats, reply_to, false).await;
+                }
+            } else if let Some(tool_msg_id) = last_tool_msg_id {
+                // Turn ended with only tool calls — append stats to the tool group message.
+                use teloxide::prelude::Requester;
+                let edited = format!("{tool_group_text}\n{stats}");
+                if let Err(e) = bot
+                    .edit_message_text(group_id, MessageId(tool_msg_id), &edited)
+                    .parse_mode(teloxide::types::ParseMode::Html)
+                    .await
+                {
+                    warn!("telegram: TurnComplete: failed to append stats to tool message: {e}");
+                    let reply_to = state.last_bot_message_id;
                     send_text_reply(bot, group_id, thread_id, &stats, reply_to, false).await;
                 }
             } else {
@@ -683,27 +715,39 @@ async fn handle_orch_event(
                 if let Some(tid) = state.thread_id {
                     let bot_clone = bot.clone();
                     let title = title.clone();
+
+                    // Resolve the icon sticker ID from the cached map.
+                    // If Claude picked an emoji that isn't in the allowed set, fall back to
+                    // the first available icon so the topic always gets a valid icon.
+                    let (emoji_str, display_title) = split_emoji_from_title(&title);
+                    let display_title = if display_title.is_empty() { title.clone() } else { display_title };
+                    let icon_emoji_id: Option<String> = if !topic_icon_cache.is_empty() {
+                        emoji_str
+                            .as_deref()
+                            .and_then(|e| topic_icon_cache.get(e).cloned())
+                            .or_else(|| {
+                                // Claude chose an emoji not in the allowed set — use a sensible default.
+                                warn!("telegram: emoji {:?} not in icon sticker set, using fallback", emoji_str);
+                                topic_icon_cache.get("💬")
+                                    .or_else(|| topic_icon_cache.values().next())
+                                    .cloned()
+                            })
+                    } else {
+                        None
+                    };
+
                     tokio::spawn(async move {
                         use teloxide::prelude::Requester;
-                        // Parse optional leading emoji: "🤔 General chat" → ("🤔", "General chat")
-                        let (emoji_str, display_title) = split_emoji_from_title(&title);
-                        let display_title = if display_title.is_empty() { title.clone() } else { display_title };
-
-                        // Resolve the custom emoji ID for the thread icon if we have an emoji.
-                        let icon_emoji_id = if let Some(emoji) = emoji_str {
-                            crate::topics::find_topic_icon_emoji_id(&bot_clone, &emoji).await
-                        } else {
-                            None
-                        };
-
                         let mut req = bot_clone.edit_forum_topic(group_id, tid).name(display_title.clone());
                         if let Some(id) = icon_emoji_id {
                             req = req.icon_custom_emoji_id(id);
                         }
-                        if let Err(e) = req.await {
-                            warn!("telegram: ConversationRenamed: failed to rename topic: {e}");
-                        } else {
-                            info!("telegram: renamed topic to '{display_title}'");
+                        match req.await {
+                            Ok(_) => info!("telegram: renamed topic to '{display_title}'"),
+                            Err(e) if e.to_string().contains("TOPIC_NOT_MODIFIED") => {
+                                // Topic already has this name/icon — not an error.
+                            }
+                            Err(e) => warn!("telegram: ConversationRenamed: failed to rename topic: {e}"),
                         }
                     });
                 }

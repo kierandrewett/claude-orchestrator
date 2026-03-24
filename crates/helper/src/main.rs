@@ -178,24 +178,54 @@ fn run_mcp() {
                             .unwrap_or("")
                             .to_string();
                         info!(title = %title, "rename_conversation called");
-                        let result = call_rename_conversation(&title);
-                        Some(match result {
-                            Ok(()) => { info!("rename_conversation succeeded"); json!({
+
+                        // If an allowed emoji list is configured, validate that the title
+                        // starts with one of the allowed emojis. Return an error so Claude
+                        // is forced to retry with a valid emoji rather than silently accepting.
+                        let emoji_error: Option<String> = if !allowed_emojis.is_empty() {
+                            let first_token = title.split_whitespace().next().unwrap_or("");
+                            if allowed_emojis.iter().any(|e| e == first_token) {
+                                None
+                            } else {
+                                warn!(title = %title, "rename_conversation: emoji not in allowed list");
+                                Some(format!(
+                                    "Invalid emoji. The title must begin with one of the allowed emojis: {}\n\
+                                     Please retry with a title starting with an emoji from that list.",
+                                    allowed_emojis.join(", ")
+                                ))
+                            }
+                        } else {
+                            None
+                        };
+
+                        Some(if let Some(err_msg) = emoji_error {
+                            json!({
                                 "jsonrpc": "2.0",
                                 "id": id,
                                 "result": {
-                                    "content": [],
-                                    "isError": false
-                                }
-                            }) },
-                            Err(e) => { warn!(error = %e, "rename_conversation failed"); json!({
-                                "jsonrpc": "2.0",
-                                "id": id,
-                                "result": {
-                                    "content": [{"type": "text", "text": format!("Error: {e}")}],
+                                    "content": [{"type": "text", "text": err_msg}],
                                     "isError": true
                                 }
-                            }) },
+                            })
+                        } else {
+                            match call_rename_conversation(&title) {
+                                Ok(()) => { info!("rename_conversation succeeded"); json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "result": {
+                                        "content": [],
+                                        "isError": false
+                                    }
+                                }) },
+                                Err(e) => { warn!(error = %e, "rename_conversation failed"); json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "result": {
+                                        "content": [{"type": "text", "text": format!("Error: {e}")}],
+                                        "isError": true
+                                    }
+                                }) },
+                            }
                         })
                     }
                     _ => Some(json!({

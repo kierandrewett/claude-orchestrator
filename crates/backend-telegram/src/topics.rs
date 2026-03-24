@@ -36,8 +36,3 @@ async fn find_icon_emoji_id(bot: &Bot, emoji: &str) -> Option<String> {
         }
     }
 }
-
-/// Public wrapper used by the backend when updating an existing topic's icon.
-pub async fn find_topic_icon_emoji_id(bot: &Bot, emoji: &str) -> Option<String> {
-    find_icon_emoji_id(bot, emoji).await
-}
