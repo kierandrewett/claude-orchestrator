@@ -867,6 +867,20 @@ async fn handle_orch_event(
                 }
             }
         }
+
+        OrchestratorEvent::ClientConnected { hostname, .. } => {
+            let thread_id = states
+                .get("scratchpad")
+                .and_then(|s| s.thread_id);
+            send_text_reply(bot, group_id, thread_id, &format!("🟢 Client connected: <code>{}</code>", crate::formatting::escape_html(hostname)), None, false).await;
+        }
+
+        OrchestratorEvent::ClientDisconnected { hostname, .. } => {
+            let thread_id = states
+                .get("scratchpad")
+                .and_then(|s| s.thread_id);
+            send_text_reply(bot, group_id, thread_id, &format!("🔴 Client disconnected: <code>{}</code>", crate::formatting::escape_html(hostname)), None, false).await;
+        }
     }
 }
 

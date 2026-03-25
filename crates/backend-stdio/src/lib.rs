@@ -135,6 +135,12 @@ fn print_event(ev: &OrchestratorEvent) {
         OrchestratorEvent::ConversationRenamed { task_id, title } => {
             println!("[{task_id}] ✏️  Conversation renamed to '{title}'");
         }
+        OrchestratorEvent::ClientConnected { client_id, hostname } => {
+            println!("[client] 🟢 Connected: {client_id} ({hostname})");
+        }
+        OrchestratorEvent::ClientDisconnected { client_id, hostname } => {
+            println!("[client] 🔴 Disconnected: {client_id} ({hostname})");
+        }
     }
 }
 

@@ -355,7 +355,9 @@ async fn handle_orch_event(
         OrchestratorEvent::PhaseChanged { .. }
         | OrchestratorEvent::QueuedMessageDelivered { .. }
         | OrchestratorEvent::MessageQueued { .. }
-        | OrchestratorEvent::ConversationRenamed { .. } => {}
+        | OrchestratorEvent::ConversationRenamed { .. }
+        | OrchestratorEvent::ClientConnected { .. }
+        | OrchestratorEvent::ClientDisconnected { .. } => {}
     }
 }
 
@@ -415,6 +417,8 @@ fn event_name(event: &OrchestratorEvent) -> &'static str {
         OrchestratorEvent::FileOutput { .. } => "FileOutput",
         OrchestratorEvent::CommandResponse { .. } => "CommandResponse",
         OrchestratorEvent::ConversationRenamed { .. } => "ConversationRenamed",
+        OrchestratorEvent::ClientConnected { .. } => "ClientConnected",
+        OrchestratorEvent::ClientDisconnected { .. } => "ClientDisconnected",
     }
 }
 
