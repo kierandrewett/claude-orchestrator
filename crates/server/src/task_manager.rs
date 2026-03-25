@@ -30,6 +30,10 @@ pub struct TaskConfig {
     pub show_thinking: bool,
     /// Tool names available in the current session (from the most recent system/init event).
     pub available_tools: Vec<String>,
+    /// MCP tool names suppressed for this session (looked up by the MCP handler).
+    pub suppress_mcp_tools: Vec<String>,
+    /// Allowed emoji prefixes for rename_conversation (empty = any).
+    pub allowed_emojis: Vec<String>,
 }
 
 // ── Task ──────────────────────────────────────────────────────────────────────

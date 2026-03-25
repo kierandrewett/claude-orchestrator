@@ -46,6 +46,13 @@ impl Orchestrator {
         self.backend_caps.lock().unwrap().clone()
     }
 
+    fn session_allowed_emojis(&self) -> Vec<String> {
+        self.backend_caps.lock().unwrap()
+            .get("ORCHESTRATOR_ALLOWED_EMOJIS")
+            .map(|s| s.split(',').filter(|e| !e.is_empty()).map(|e| e.to_string()).collect())
+            .unwrap_or_default()
+    }
+
     /// Build the system prompt to inject into every new session.
     ///
     /// Prepends a fixed instruction so Claude always calls `rename_conversation`
@@ -358,6 +365,11 @@ impl Orchestrator {
                 } else {
                     vec![]
                 };
+                let allowed_emojis = self.session_allowed_emojis();
+                self.registry.with_mut(task_id, |t| {
+                    t.config.suppress_mcp_tools = suppress_mcp_tools.clone();
+                    t.config.allowed_emojis = allowed_emojis.clone();
+                });
                 info!("orchestrator: starting session for {task_id} (resume={is_resume})");
                 let delivered = self.clients.send_to_any_client(S2C::StartSession {
                     session_id,
@@ -623,6 +635,11 @@ impl Orchestrator {
         });
 
         let (mcp_servers, disabled_mcp_servers) = self.mcp_session_args();
+        let allowed_emojis = self.session_allowed_emojis();
+        self.registry.with_mut(&task_id, |t| {
+            t.config.suppress_mcp_tools = vec![];
+            t.config.allowed_emojis = allowed_emojis.clone();
+        });
         let delivered = self.clients.send_to_any_client(S2C::StartSession {
             session_id,
             initial_prompt: if prompt.is_empty() { None } else { Some(prompt.clone()) },

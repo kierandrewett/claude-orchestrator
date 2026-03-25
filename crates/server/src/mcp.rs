@@ -87,13 +87,14 @@ pub async fn mcp_post_handler(
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }
     let session_id = params.get("session_id").map(|s| s.as_str()).unwrap_or("");
-    let suppress_tools: HashSet<String> = params
-        .get("suppress")
-        .map(|s| s.split(',').filter(|t| !t.is_empty()).map(|t| t.to_string()).collect())
-        .unwrap_or_default();
-    let allowed_emojis: Vec<String> = params
-        .get("emojis")
-        .map(|s| s.split(',').filter(|e| !e.is_empty()).map(|e| e.to_string()).collect())
+    let (suppress_tools, allowed_emojis) = state.registry
+        .find_by_session_id(session_id)
+        .and_then(|tid| state.registry.with(&tid, |t| {
+            (
+                t.config.suppress_mcp_tools.iter().cloned().collect::<HashSet<String>>(),
+                t.config.allowed_emojis.clone(),
+            )
+        }))
         .unwrap_or_default();
     let method = req["method"].as_str().unwrap_or("");
 
