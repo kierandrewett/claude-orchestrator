@@ -135,4 +135,16 @@ pub enum OrchestratorEvent {
         task_id: TaskId,
         title: String,
     },
+
+    /// A claude-client daemon connected.
+    ClientConnected {
+        client_id: String,
+        hostname: String,
+    },
+
+    /// A claude-client daemon disconnected.
+    ClientDisconnected {
+        client_id: String,
+        hostname: String,
+    },
 }

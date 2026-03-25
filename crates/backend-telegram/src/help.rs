@@ -45,7 +45,11 @@ fn tasks_text() -> &'static str {
      <code>/stop</code> — Kill the current task permanently\n\
      <code>/hibernate</code> — Suspend the current task\n\
      <code>/cost</code> — Show cost for the current task\n\
-     <code>/cost all</code> — Show cost breakdown for all tasks"
+     <code>/cost all</code> — Show cost breakdown for all tasks\n\n\
+     <b>Examples</b>\n\
+     <code>/stop</code> — stop the task in the current topic\n\
+     <code>/stop abc123</code> — stop a specific task by ID\n\
+     <code>/cost all</code> — see a cost breakdown across every task"
 }
 
 fn mcp_text() -> &'static str {
@@ -56,14 +60,21 @@ fn mcp_text() -> &'static str {
      <code>/mcp disable &lt;name&gt;</code> — Disable a server (including built-ins)\n\
      <code>/mcp enable &lt;name&gt;</code> — Re-enable a disabled server\n\n\
      The built-in <code>orchestrator</code> server gives Claude tools like \
-     <code>rename_conversation</code>."
+     <code>rename_conversation</code>.\n\n\
+     <b>Examples</b>\n\
+     <code>/mcp add filesystem npx @modelcontextprotocol/server-filesystem /home/user</code>\n\
+     <code>/mcp add github docker run -i --rm ghcr.io/github/github-mcp-server</code>\n\
+     <code>/mcp disable orchestrator</code> — turn off the built-in server"
 }
 
 fn config_text() -> &'static str {
     "<b>⚙️ Configuration</b>\n\n\
      <code>/config thinking on|off</code> — Show or hide Claude's internal thinking\n\
      <code>/reconnect &lt;task_id&gt;</code> — Link a topic to an existing task by ID \
-     (use <code>/status</code> to find IDs)"
+     (use <code>/status</code> to find IDs)\n\n\
+     <b>Examples</b>\n\
+     <code>/config thinking on</code> — show Claude's reasoning in collapsible blocks\n\
+     <code>/reconnect 550e8400-e29b-41d4-a716-446655440000</code> — reattach after bot restart"
 }
 
 fn topics_text() -> &'static str {
@@ -77,7 +88,11 @@ fn topics_text() -> &'static str {
      <b>Topic states</b>\n\
      🟢 Active — Claude is running\n\
      💤 Sleeping — Session is suspended, resumes on next message\n\
-     💀 Stopped — Task has ended permanently"
+     💀 Stopped — Task has ended permanently\n\n\
+     <b>Examples</b>\n\
+     Message a 💤 topic → Claude wakes up and continues where it left off\n\
+     <code>/rename refactor auth</code> — give the current topic a meaningful name\n\
+     <code>/hibernate</code> — manually suspend a task to free up resources"
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────

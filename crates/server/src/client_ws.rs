@@ -44,6 +44,7 @@ pub async fn handle_client_ws(
     });
 
     let mut client_id: Option<String> = None;
+    let mut client_hostname: Option<String> = None;
 
     // Reader loop.
     while let Some(raw) = ws_rx.next().await {
@@ -77,6 +78,7 @@ pub async fn handle_client_ws(
             &bus,
             &s2c_tx,
             &mut client_id,
+            &mut client_hostname,
         )
         .await;
     }
@@ -104,6 +106,11 @@ pub async fn handle_client_ws(
                 });
             }
         }
+        let hostname = client_hostname.unwrap_or_default();
+        bus.emit(OrchestratorEvent::ClientDisconnected {
+            client_id: id.clone(),
+            hostname,
+        });
         registry.unregister_client(id);
         info!("client_ws: client {id} disconnected");
     }
@@ -118,6 +125,7 @@ async fn handle_c2s(
     bus: &Arc<EventBus>,
     s2c_tx: &mpsc::UnboundedSender<S2C>,
     client_id: &mut Option<String>,
+    client_hostname: &mut Option<String>,
 ) {
     match msg {
         C2S::Hello {
@@ -126,7 +134,12 @@ async fn handle_c2s(
         } => {
             info!("client_ws: Hello from {id} ({hostname})");
             registry.register_client(id.clone(), s2c_tx.clone());
+            bus.emit(OrchestratorEvent::ClientConnected {
+                client_id: id.clone(),
+                hostname: hostname.clone(),
+            });
             *client_id = Some(id);
+            *client_hostname = Some(hostname);
         }
 
         C2S::SessionStarted { session_id, cwd, .. } => {
