@@ -961,7 +961,7 @@ async fn handle_orch_event(
                 .and_then(|s| s.thread_id);
             use crate::formatting::escape_html;
             let html = format!(
-                "🕐 {}\n\n<code>   ❯ scheduled: \"{}\" ({})</code>",
+                "🕐 {}\n<code>❯ scheduled: \"{}\" ({})</code>",
                 escape_html(text),
                 escape_html(event_name),
                 escape_html(schedule),
