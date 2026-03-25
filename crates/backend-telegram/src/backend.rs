@@ -195,7 +195,9 @@ impl MessagingBackend for TelegramBackend {
             match probe {
                 Ok(m) => {
                     let _ = bot.delete_message(group_id, m.id).await;
-                    task_states.lock().await.insert("scratchpad".to_string(), TaskTopicState::new(Some(thread_id)));
+                    let mut sp_state = TaskTopicState::new(Some(thread_id));
+                    sp_state.display_title = self.config.scratchpad_topic_name.clone();
+                    task_states.lock().await.insert("scratchpad".to_string(), sp_state);
                     thread_to_task.lock().await.insert(tid, "scratchpad".to_string());
                     info!("telegram: restored scratchpad topic thread_id={tid}");
                     false
@@ -707,19 +709,22 @@ async fn handle_orch_event(
         }
 
         OrchestratorEvent::TaskStateChanged {
-            task_id, new_state, ..
+            task_id, old_state, new_state, ..
         } => {
             let state = states
                 .entry(task_id.0.clone())
                 .or_insert_with(|| TaskTopicState::new(None));
             let thread_id = state.thread_id;
             let display_title = state.display_title.clone();
-            let text = match new_state {
-                TaskStateSummary::Hibernated => format_hibernated().to_string(),
-                TaskStateSummary::Dead => "💀 Task stopped.".to_string(),
-                TaskStateSummary::Running => "🟢 Task resumed.".to_string(),
-            };
-            send_text_reply(bot, group_id, thread_id, &text, None, false).await;
+            // Only send a chat message on genuine state transitions, not sync replays.
+            if old_state != new_state {
+                let text = match new_state {
+                    TaskStateSummary::Hibernated => format_hibernated().to_string(),
+                    TaskStateSummary::Dead => "💀 Task stopped.".to_string(),
+                    TaskStateSummary::Running => "🟢 Task resumed.".to_string(),
+                };
+                send_text_reply(bot, group_id, thread_id, &text, None, false).await;
+            }
 
             // Append 💤 to the topic name when hibernating; remove it on resume/stop.
             let hibernated = *new_state == TaskStateSummary::Hibernated;
@@ -1020,10 +1025,9 @@ async fn handle_incoming(
                 Ok(thread_id) => {
                     let tid_i32 = thread_id.0.0;
                     thread_to_task.lock().await.insert(tid_i32, "scratchpad".to_string());
-                    task_states.lock().await.insert(
-                        "scratchpad".to_string(),
-                        TaskTopicState::new(Some(thread_id)),
-                    );
+                    let mut sp_state = TaskTopicState::new(Some(thread_id));
+                    sp_state.display_title = scratchpad_topic_name.to_string();
+                    task_states.lock().await.insert("scratchpad".to_string(), sp_state);
                     let mut ts = TelegramState::load(state_dir);
                     ts.scratchpad_thread_id = Some(tid_i32);
                     ts.save(state_dir);
