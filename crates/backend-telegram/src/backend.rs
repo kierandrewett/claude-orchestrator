@@ -14,7 +14,7 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
 use crate::formatting::{
-    format_error, format_hibernated, format_thinking, format_tool_completed, format_tool_started,
+    format_error, format_thinking, format_tool_completed, format_tool_started,
     format_turn_complete, md_to_telegram_html, split_emoji_from_title,
 };
 use crate::reactions::{apply_reaction, clear_reaction, ReactionTracker};
@@ -718,12 +718,9 @@ async fn handle_orch_event(
             let display_title = state.display_title.clone();
             // Only send a chat message on genuine state transitions, not sync replays.
             if old_state != new_state {
-                let text = match new_state {
-                    TaskStateSummary::Hibernated => format_hibernated().to_string(),
-                    TaskStateSummary::Dead => "💀 Task stopped.".to_string(),
-                    TaskStateSummary::Running => "🟢 Task resumed.".to_string(),
-                };
-                send_text_reply(bot, group_id, thread_id, &text, None, false).await;
+                if *new_state == TaskStateSummary::Dead {
+                    send_text_reply(bot, group_id, thread_id, "💀 Task stopped.", None, false).await;
+                }
             }
 
             // Append 💤 to the topic name when hibernating; remove it on resume/stop.
@@ -1139,8 +1136,13 @@ async fn handle_incoming(
                         })
                         .await;
                 }
-                Err(_) => {
-                    debug!("telegram: ignoring unknown command: {text}");
+                Err(e) => {
+                    let err = e.to_string();
+                    if err.starts_with("unknown command") {
+                        debug!("telegram: ignoring unknown command: {text}");
+                    } else {
+                        send_text_reply(&bot, group_id, msg.thread_id, &format!("❌ {err}"), Some(msg.id.0), false).await;
+                    }
                 }
             }
             return;
