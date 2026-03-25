@@ -61,8 +61,6 @@ async fn fire_event(
     let enabled = if consecutive_failures >= 3 {
         warn!("scheduler: auto-disabling event '{}' after 3 consecutive TaskNotFound", event.id);
         false
-    } else if matches!(event.mode, ScheduleMode::Once) && matches!(status, ExecutionStatus::Success | ExecutionStatus::Skipped) {
-        false
     } else {
         event.enabled
     };
@@ -74,8 +72,15 @@ async fn fire_event(
         None
     };
 
+    // Once events are deleted after firing so they don't clutter /events.
+    let fired_once = matches!(event.mode, ScheduleMode::Once)
+        && matches!(status, ExecutionStatus::Success | ExecutionStatus::Skipped);
     db.log_execution(&event.id, status, detail.as_deref());
-    db.update_event_after_fire(&event.id, fired_at, next_run, enabled, consecutive_failures);
+    if fired_once {
+        db.delete_event(&event.id);
+    } else {
+        db.update_event_after_fire(&event.id, fired_at, next_run, enabled, consecutive_failures);
+    }
 
     // Emit EventsChanged so backends can refresh their event displays
     bus.emit(OrchestratorEvent::ScheduledEventFired {
