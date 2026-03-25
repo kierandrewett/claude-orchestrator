@@ -94,13 +94,13 @@ pub fn parse(text: &str) -> Result<ParsedCommand> {
             let key = iter
                 .next()
                 .filter(|s| !s.is_empty())
-                .ok_or_else(|| anyhow::anyhow!("usage: /config <key> <value>"))?
+                .ok_or_else(|| anyhow::anyhow!("usage: /config KEY VALUE"))?
                 .to_string();
             let value = iter
                 .next()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .ok_or_else(|| anyhow::anyhow!("usage: /config <key> <value>"))?
+                .ok_or_else(|| anyhow::anyhow!("usage: /config KEY VALUE"))?
                 .to_string();
             Ok(ParsedCommand::Config { key, value })
         }
@@ -113,12 +113,12 @@ pub fn parse(text: &str) -> Result<ParsedCommand> {
                     let name = parts
                         .get(1)
                         .filter(|s| !s.is_empty())
-                        .ok_or_else(|| anyhow::anyhow!("usage: /mcp add <name> <command> [args...]"))?
+                        .ok_or_else(|| anyhow::anyhow!("usage: /mcp add NAME COMMAND [args...]"))?
                         .to_string();
                     let command = parts
                         .get(2)
                         .filter(|s| !s.is_empty())
-                        .ok_or_else(|| anyhow::anyhow!("usage: /mcp add <name> <command> [args...]"))?
+                        .ok_or_else(|| anyhow::anyhow!("usage: /mcp add NAME COMMAND [args...]"))?
                         .to_string();
                     let args = parts[3..].iter().map(|s| s.to_string()).collect();
                     Ok(ParsedCommand::McpAdd { name, command, args })
@@ -127,7 +127,7 @@ pub fn parse(text: &str) -> Result<ParsedCommand> {
                     let name = parts
                         .get(1)
                         .filter(|s| !s.is_empty())
-                        .ok_or_else(|| anyhow::anyhow!("usage: /mcp remove <name>"))?
+                        .ok_or_else(|| anyhow::anyhow!("usage: /mcp remove NAME"))?
                         .to_string();
                     Ok(ParsedCommand::McpRemove { name })
                 }
@@ -135,7 +135,7 @@ pub fn parse(text: &str) -> Result<ParsedCommand> {
                     let name = parts
                         .get(1)
                         .filter(|s| !s.is_empty())
-                        .ok_or_else(|| anyhow::anyhow!("usage: /mcp disable <name>"))?
+                        .ok_or_else(|| anyhow::anyhow!("usage: /mcp disable NAME"))?
                         .to_string();
                     Ok(ParsedCommand::McpDisable { name })
                 }
@@ -143,7 +143,7 @@ pub fn parse(text: &str) -> Result<ParsedCommand> {
                     let name = parts
                         .get(1)
                         .filter(|s| !s.is_empty())
-                        .ok_or_else(|| anyhow::anyhow!("usage: /mcp enable <name>"))?
+                        .ok_or_else(|| anyhow::anyhow!("usage: /mcp enable NAME"))?
                         .to_string();
                     Ok(ParsedCommand::McpEnable { name })
                 }
@@ -157,22 +157,22 @@ pub fn parse(text: &str) -> Result<ParsedCommand> {
                 None | Some("list") => Ok(ParsedCommand::EventsList),
                 Some("info") => {
                     let id = parts.get(1).cloned()
-                        .ok_or_else(|| anyhow::anyhow!("usage: /events info <id>"))?;
+                        .ok_or_else(|| anyhow::anyhow!("usage: /events info ID"))?;
                     Ok(ParsedCommand::EventsInfo { id })
                 }
                 Some("enable") => {
                     let id = parts.get(1).cloned()
-                        .ok_or_else(|| anyhow::anyhow!("usage: /events enable <id>"))?;
+                        .ok_or_else(|| anyhow::anyhow!("usage: /events enable ID"))?;
                     Ok(ParsedCommand::EventsEnable { id })
                 }
                 Some("disable") => {
                     let id = parts.get(1).cloned()
-                        .ok_or_else(|| anyhow::anyhow!("usage: /events disable <id>"))?;
+                        .ok_or_else(|| anyhow::anyhow!("usage: /events disable ID"))?;
                     Ok(ParsedCommand::EventsDisable { id })
                 }
                 Some("delete") => {
                     let id = parts.get(1).cloned()
-                        .ok_or_else(|| anyhow::anyhow!("usage: /events delete <id>"))?;
+                        .ok_or_else(|| anyhow::anyhow!("usage: /events delete ID"))?;
                     Ok(ParsedCommand::EventsDelete { id })
                 }
                 Some(other) => bail!("unknown /events subcommand '{}'. Use: list, info, enable, disable, delete", other),
