@@ -100,12 +100,12 @@ async fn execute_action(
                     (ExecutionStatus::TaskNotFound, Some("Scratchpad task not found".to_string()))
                 }
                 Some(_) => {
-                    let body = format_scheduler_message(message, event);
                     bus.emit(OrchestratorEvent::SchedulerMessage {
                         task_id: TaskId("scratchpad".to_string()),
-                        text: body,
+                        text: message.clone(),
                         event_id: event.id.clone(),
                         event_name: event.name.clone(),
+                        schedule: event.schedule.clone(),
                     });
                     (ExecutionStatus::Success, None)
                 }
@@ -117,12 +117,12 @@ async fn execute_action(
             if !exists {
                 return (ExecutionStatus::TaskNotFound, Some(format!("Task '{task_id}' not found")));
             }
-            let body = format_scheduler_message(message, event);
             bus.emit(OrchestratorEvent::SchedulerMessage {
                 task_id: TaskId(task_id.clone()),
-                text: body,
+                text: message.clone(),
                 event_id: event.id.clone(),
                 event_name: event.name.clone(),
+                schedule: event.schedule.clone(),
             });
             (ExecutionStatus::Success, None)
         }
@@ -149,9 +149,10 @@ async fn execute_action(
             // Emit a visible attribution message so the user can see what triggered this.
             bus.emit(OrchestratorEvent::SchedulerMessage {
                 task_id: TaskId(task_id.clone()),
-                text: format!("📅 Triggered by scheduled event: \"{}\"", event.name),
+                text: format!("Triggered by scheduled event: \"{}\"", event.name),
                 event_id: event.id.clone(),
                 event_name: event.name.clone(),
+                schedule: event.schedule.clone(),
             });
 
             // Inject as a UserMessage via the event bus
@@ -169,9 +170,6 @@ async fn execute_action(
     }
 }
 
-fn format_scheduler_message(message: &str, event: &ScheduledEvent) -> String {
-    format!("{}\n\n`scheduled: \"{}\" ({})`", message, event.name, event.schedule)
-}
 
 /// Calculate the next run time for a cron expression.
 /// The `cron` crate uses 6-field format (sec min hour dom month dow),

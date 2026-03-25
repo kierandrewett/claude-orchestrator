@@ -897,18 +897,23 @@ async fn handle_orch_event(
 
         OrchestratorEvent::McpList { entries, session_tools, trigger_ref } => {
             let mut guard = last_mcp_msg.lock().await;
-            if let Some((chat_id, msg_id)) = *guard {
-                // Edit the existing list message in place.
-                crate::mcp::edit_mcp_list(bot, chat_id, msg_id, entries, session_tools).await;
-            } else {
-                // Send a new message in the thread the command came from.
-                let thread_id = telegram_thread_id(trigger_ref);
-                let reply_to = telegram_msg_id(trigger_ref);
-                if let Some(msg_id) =
-                    crate::mcp::send_mcp_list(bot, group_id, thread_id, reply_to, entries, session_tools).await
-                {
-                    *guard = Some((group_id, msg_id));
+            // Button press or mutation auto-refresh → edit in place.
+            // Direct /mcp command → always send a new message.
+            let is_direct_command = trigger_ref
+                .as_ref()
+                .map_or(false, |r| !r.opaque_id.starts_with("btn:"));
+            if !is_direct_command {
+                if let Some((chat_id, msg_id)) = *guard {
+                    crate::mcp::edit_mcp_list(bot, chat_id, msg_id, entries, session_tools).await;
+                    return;
                 }
+            }
+            let thread_id = telegram_thread_id(trigger_ref);
+            let reply_to = telegram_msg_id(trigger_ref);
+            if let Some(msg_id) =
+                crate::mcp::send_mcp_list(bot, group_id, thread_id, reply_to, entries, session_tools).await
+            {
+                *guard = Some((group_id, msg_id));
             }
         }
 
@@ -950,13 +955,18 @@ async fn handle_orch_event(
             send_text_reply(bot, group_id, thread_id, &format!("🔴 Client disconnected: <code>{}</code>", crate::formatting::escape_html(hostname)), None, false).await;
         }
 
-        OrchestratorEvent::SchedulerMessage { task_id, text, .. } => {
+        OrchestratorEvent::SchedulerMessage { task_id, text, event_name, schedule, .. } => {
             let thread_id = states
                 .get(&task_id.0)
                 .and_then(|s| s.thread_id);
             use crate::formatting::escape_html;
-            let html = format!("🕐 {}", escape_html(text));
-            send_text_reply(bot, group_id, thread_id, &html, None, true).await;
+            let html = format!(
+                "🕐 {}\n\n<code>   ❯ scheduled: \"{}\" ({})</code>",
+                escape_html(text),
+                escape_html(event_name),
+                escape_html(schedule),
+            );
+            send_text_reply(bot, group_id, thread_id, &html, None, false).await;
         }
 
         OrchestratorEvent::ScheduledEventFired { .. } => {

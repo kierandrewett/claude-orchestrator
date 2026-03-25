@@ -138,11 +138,15 @@ fn agent_display(summary: &str) -> (String, String) {
 
 /// Build the detail block shown below the tool name line.
 fn tool_detail(tool_name: &str, summary: &str) -> String {
-    // MCP tools: format args as `Key: value` lines in a code block.
+    // MCP tools: each key-value arg on its own indented line.
     if parse_mcp_name(tool_name).is_some() {
         let args = format_kv_args(summary);
         if args.is_empty() { return String::new(); }
-        return format!("<code>   ❯ {}</code>", escape_html(&args));
+        let indented: String = args.lines()
+            .map(|l| format!("   ❯ {}", l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return format!("<code>{}</code>", escape_html(&indented));
     }
 
     let val: serde_json::Value = serde_json::from_str(summary).unwrap_or_default();
@@ -174,7 +178,11 @@ pub fn format_tool_started(tool_name: &str, summary: &str) -> String {
         display_name(tool_name)
     };
     let detail = tool_detail(tool_name, summary);
-    format!("{emoji} <b>{}</b>\n{}", escape_html(&name), detail)
+    if detail.is_empty() {
+        format!("{emoji} <b>{}</b>", escape_html(&name))
+    } else {
+        format!("{emoji} <b>{}</b>\n{}", escape_html(&name), detail)
+    }
 }
 
 /// Format a tool_completed event (replaces the started message).
@@ -207,7 +215,11 @@ pub fn format_tool_completed(
             format!("\n<code>{}</code>", escape_html(&truncated))
         })
         .unwrap_or_default();
-    format!("{status} {emoji} <b>{}</b>\n{}{}", escape_html(&name), detail, preview_str)
+    if detail.is_empty() {
+        format!("{status} {emoji} <b>{}</b>{}", escape_html(&name), preview_str)
+    } else {
+        format!("{status} {emoji} <b>{}</b>\n{}{}", escape_html(&name), detail, preview_str)
+    }
 }
 
 /// Format a turn_complete event as an inline suffix (italic, appended on new line).

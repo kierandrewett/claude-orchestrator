@@ -171,6 +171,8 @@ pub enum OrchestratorEvent {
         text: String,
         event_id: String,
         event_name: String,
+        #[serde(default)]
+        schedule: String,
     },
 
     /// A scheduled event fired (used to notify backends to refresh event displays).
