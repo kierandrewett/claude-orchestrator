@@ -18,14 +18,18 @@ COPY crates/backend-web/Cargo.toml      ./crates/backend-web/
 COPY crates/backend-stdio/Cargo.toml          ./crates/backend-stdio/
 COPY crates/claude-generate-config/Cargo.toml ./crates/claude-generate-config/
 COPY crates/helper/Cargo.toml                 ./crates/helper/
+COPY crates/db/Cargo.toml                     ./crates/db/
+COPY crates/scheduler/Cargo.toml              ./crates/scheduler/
 
 RUN for dir in crates/server crates/client crates/ndjson crates/events crates/containers \
         crates/orchestrator-llm crates/backend-traits crates/backend-telegram \
         crates/backend-discord crates/backend-web crates/backend-stdio \
-        crates/claude-generate-config crates/helper; do \
+        crates/claude-generate-config crates/helper crates/db crates/scheduler; do \
         mkdir -p "$dir/src" && echo 'fn main() {}' > "$dir/src/main.rs"; \
     done && \
-    mkdir -p crates/shared/src && echo 'pub fn dummy() {}' > crates/shared/src/lib.rs && \
+    mkdir -p crates/shared/src   && echo 'pub fn dummy() {}' > crates/shared/src/lib.rs && \
+    mkdir -p crates/db/src       && echo 'pub fn dummy() {}' > crates/db/src/lib.rs && \
+    mkdir -p crates/scheduler/src && echo 'pub fn dummy() {}' > crates/scheduler/src/lib.rs && \
     cargo build --release -p claude-server 2>/dev/null || true && \
     rm -rf crates/*/src
 

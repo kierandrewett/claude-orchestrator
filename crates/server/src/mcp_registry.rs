@@ -168,7 +168,8 @@ impl McpServerRegistry {
         entries
     }
 
-    /// Build a status display string for the /mcp list command.
+    /// Build a plain-text status display string (used by non-Telegram backends).
+    #[allow(dead_code)]
     pub fn list_display(&self) -> String {
         let data = self.data.lock().unwrap();
         let disabled_set: std::collections::HashSet<&str> =

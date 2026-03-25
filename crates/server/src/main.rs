@@ -134,6 +134,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
     std::fs::create_dir_all(&state_dir).ok();
     let store = Arc::new(StateStore::new(&state_dir));
     let mcp_registry = Arc::new(McpServerRegistry::load(&state_dir));
+    let db = claude_db::Db::open(&state_dir).expect("failed to open db");
 
     let mut bus = EventBus::new();
     let backend_rx = bus.take_backend_receiver();
@@ -141,7 +142,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
     let registry = Arc::new(TaskRegistry::new());
     let client_registry = Arc::new(ClientRegistry::new());
 
-    // Load persisted state.
+    // Load persisted state and sync to DB so the scheduler can find all tasks.
     match store.load() {
         Ok(state) => {
             info!("loaded {} persisted tasks", state.tasks.len());
@@ -151,8 +152,8 @@ async fn run(config_path: PathBuf) -> Result<()> {
                     continue;
                 }
                 let mut task = task_manager::Task::new(
-                    pt.id,
-                    pt.name,
+                    pt.id.clone(),
+                    pt.name.clone(),
                     pt.profile,
                     task_manager::TaskState::Hibernated,
                     pt.kind,
@@ -160,7 +161,16 @@ async fn run(config_path: PathBuf) -> Result<()> {
                 task.usage = pt.usage;
                 task.last_activity = pt.last_activity;
                 task.created_at = pt.created_at;
-                task.claude_session_id = pt.claude_session_id;
+                task.claude_session_id = pt.claude_session_id.clone();
+                // Sync into SQLite so the scheduler can query tasks by id.
+                db.upsert_task(&claude_db::TaskRow {
+                    task_id: pt.id.0.clone(),
+                    task_name: pt.name.clone(),
+                    session_id: pt.claude_session_id,
+                    session_status: "hibernated".to_string(),
+                    created_at: task.created_at.to_rfc3339(),
+                    last_activity: Some(task.last_activity.to_rfc3339()),
+                });
                 registry.insert(task);
             }
         }
@@ -254,6 +264,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
         let task_reg = Arc::clone(&registry);
         let b = Arc::clone(&bus);
         let _token = config.server.client_token.clone();
+        let db_for_mcp = db.clone();
         tokio::spawn(async move {
             let session_api_state = SessionApiState {
                 registry: Arc::clone(&task_reg),
@@ -264,6 +275,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
                 registry: Arc::clone(&task_reg),
                 bus: Arc::clone(&b),
                 connections: std::sync::Arc::new(dashmap::DashMap::new()),
+                db: db_for_mcp,
             };
 
             let app = Router::new()
@@ -323,6 +335,9 @@ async fn run(config_path: PathBuf) -> Result<()> {
         });
     }
 
+    // Start the scheduler.
+    claude_scheduler::start(db.clone(), Arc::clone(&bus), backend_sender.clone());
+
     // Run the orchestrator main loop.
     let orchestrator = Arc::new(Orchestrator::new(
         Arc::clone(&bus),
@@ -331,6 +346,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
         config,
         Arc::clone(&store),
         Arc::clone(&mcp_registry),
+        db,
     ));
 
     // Handle Ctrl-C / SIGTERM.

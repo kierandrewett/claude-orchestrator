@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{McpEntry, MessageRef, SessionPhase, TaskId, TaskKind, TaskStateSummary};
+use crate::types::{EventListEntry, McpEntry, MessageRef, SessionPhase, TaskId, TaskKind, TaskStateSummary};
 use claude_ndjson::UsageStats;
 
 /// Events emitted by the orchestrator core, broadcast to all backends.
@@ -130,6 +130,13 @@ pub enum OrchestratorEvent {
         trigger_ref: Option<MessageRef>,
     },
 
+    /// Current list of scheduled events (sent in response to /events list and after mutations).
+    EventsList {
+        entries: Vec<EventListEntry>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        trigger_ref: Option<MessageRef>,
+    },
+
     /// Current state of all MCP servers (sent in response to /mcp list and after mutations).
     McpList {
         entries: Vec<McpEntry>,
@@ -153,5 +160,19 @@ pub enum OrchestratorEvent {
     ClientDisconnected {
         client_id: String,
         hostname: String,
+    },
+
+    /// The scheduler fired a passive message into a task (user sees it, Claude does NOT respond).
+    SchedulerMessage {
+        task_id: TaskId,
+        text: String,
+        event_id: String,
+        event_name: String,
+    },
+
+    /// A scheduled event fired (used to notify backends to refresh event displays).
+    ScheduledEventFired {
+        event_id: String,
+        event_name: String,
     },
 }

@@ -90,6 +90,21 @@ pub struct McpEntry {
     pub args: Vec<String>,
 }
 
+// ── EventListEntry — lightweight view of a scheduled event for UI rendering ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventListEntry {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    /// `"once"` or `"recurring"`
+    pub mode: String,
+    pub schedule: String,
+    /// Pre-formatted local-time string, e.g. `"25 Mar 09:00"` or `"tomorrow 09:00"`.
+    pub next_run: Option<String>,
+    pub origin_task_name: String,
+}
+
 // ── TaskSummary — lightweight info about a task for LLM context ───────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

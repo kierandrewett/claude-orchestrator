@@ -357,8 +357,11 @@ async fn handle_orch_event(
         | OrchestratorEvent::MessageQueued { .. }
         | OrchestratorEvent::ConversationRenamed { .. }
         | OrchestratorEvent::McpList { .. }
+        | OrchestratorEvent::EventsList { .. }
         | OrchestratorEvent::ClientConnected { .. }
-        | OrchestratorEvent::ClientDisconnected { .. } => {}
+        | OrchestratorEvent::ClientDisconnected { .. }
+        | OrchestratorEvent::SchedulerMessage { .. }
+        | OrchestratorEvent::ScheduledEventFired { .. } => {}
     }
 }
 
@@ -419,8 +422,11 @@ fn event_name(event: &OrchestratorEvent) -> &'static str {
         OrchestratorEvent::CommandResponse { .. } => "CommandResponse",
         OrchestratorEvent::ConversationRenamed { .. } => "ConversationRenamed",
         OrchestratorEvent::McpList { .. } => "McpList",
+        OrchestratorEvent::EventsList { .. } => "EventsList",
         OrchestratorEvent::ClientConnected { .. } => "ClientConnected",
         OrchestratorEvent::ClientDisconnected { .. } => "ClientDisconnected",
+        OrchestratorEvent::SchedulerMessage { .. } => "SchedulerMessage",
+        OrchestratorEvent::ScheduledEventFired { .. } => "ScheduledEventFired",
     }
 }
 

@@ -1,0 +1,12 @@
+[package]
+name = "claude-scheduler"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+claude-db = { path = "../db" }
+claude-events = { path = "../events" }
+chrono = { version = "0.4", features = ["serde"] }
+cron = "0.12"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"

@@ -1,6 +1,7 @@
 //! Telegram messaging backend.
 
 pub mod backend;
+pub mod events;
 pub mod files;
 pub mod formatting;
 pub mod help;

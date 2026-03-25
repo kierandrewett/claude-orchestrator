@@ -41,6 +41,17 @@ pub enum ParsedCommand {
 
     /// `/mcp enable <name>` — re-enable a disabled MCP server.
     McpEnable { name: String },
+
+    /// `/events` or `/events list` — list all scheduled events.
+    EventsList,
+    /// `/events info <id>` — details for one event.
+    EventsInfo { id: String },
+    /// `/events enable <id>` — enable a paused event.
+    EventsEnable { id: String },
+    /// `/events disable <id>` — disable an event.
+    EventsDisable { id: String },
+    /// `/events delete <id>` — permanently delete an event.
+    EventsDelete { id: String },
 }
 
 /// Parse a text string beginning with `/` into a `ParsedCommand`.
@@ -137,6 +148,34 @@ pub fn parse(text: &str) -> Result<ParsedCommand> {
                     Ok(ParsedCommand::McpEnable { name })
                 }
                 Some(other) => bail!("unknown /mcp subcommand '{}'. Use: list, add, remove, disable, enable", other),
+            }
+        }
+
+        "/events" => {
+            let parts: Vec<String> = rest.split_whitespace().map(|s| s.to_string()).collect();
+            match parts.get(0).map(|s| s.as_str()) {
+                None | Some("list") => Ok(ParsedCommand::EventsList),
+                Some("info") => {
+                    let id = parts.get(1).cloned()
+                        .ok_or_else(|| anyhow::anyhow!("usage: /events info <id>"))?;
+                    Ok(ParsedCommand::EventsInfo { id })
+                }
+                Some("enable") => {
+                    let id = parts.get(1).cloned()
+                        .ok_or_else(|| anyhow::anyhow!("usage: /events enable <id>"))?;
+                    Ok(ParsedCommand::EventsEnable { id })
+                }
+                Some("disable") => {
+                    let id = parts.get(1).cloned()
+                        .ok_or_else(|| anyhow::anyhow!("usage: /events disable <id>"))?;
+                    Ok(ParsedCommand::EventsDisable { id })
+                }
+                Some("delete") => {
+                    let id = parts.get(1).cloned()
+                        .ok_or_else(|| anyhow::anyhow!("usage: /events delete <id>"))?;
+                    Ok(ParsedCommand::EventsDelete { id })
+                }
+                Some(other) => bail!("unknown /events subcommand '{}'. Use: list, info, enable, disable, delete", other),
             }
         }
 

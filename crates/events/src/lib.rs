@@ -11,6 +11,6 @@ pub use bus::EventBus;
 pub use commands::{parse as parse_command, ParsedCommand};
 pub use orchestrator_events::OrchestratorEvent;
 pub use types::{
-    BackendSource, McpEntry, MessageRef, SessionPhase, TaskId, TaskKind, TaskStateSummary,
-    TaskSummary,
+    BackendSource, EventListEntry, McpEntry, MessageRef, SessionPhase, TaskId, TaskKind,
+    TaskStateSummary, TaskSummary,
 };

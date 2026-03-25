@@ -9,6 +9,7 @@ pub const CB_HELP_TASKS:   &str = "help:tasks";
 pub const CB_HELP_MCP:     &str = "help:mcp";
 pub const CB_HELP_CONFIG:  &str = "help:config";
 pub const CB_HELP_TOPICS:  &str = "help:topics";
+pub const CB_HELP_EVENTS:  &str = "help:events";
 pub const CB_HELP_BACK:    &str = "help:back";
 
 // ── Keyboards ─────────────────────────────────────────────────────────────────
@@ -22,6 +23,9 @@ pub fn main_keyboard() -> InlineKeyboardMarkup {
         vec![
             InlineKeyboardButton::callback("⚙️ Configuration",  CB_HELP_CONFIG),
             InlineKeyboardButton::callback("💬 Topics",          CB_HELP_TOPICS),
+        ],
+        vec![
+            InlineKeyboardButton::callback("🕐 Scheduled Events", CB_HELP_EVENTS),
         ],
     ])
 }
@@ -75,6 +79,22 @@ fn config_text() -> &'static str {
      <b>Examples</b>\n\
      <code>/config thinking on</code> — show Claude's reasoning in collapsible blocks\n\
      <code>/reconnect 550e8400-e29b-41d4-a716-446655440000</code> — reattach after bot restart"
+}
+
+fn events_text() -> &'static str {
+    "<b>🕐 Scheduled Events</b>\n\n\
+     <code>/events</code> — List all scheduled events\n\
+     <code>/events list</code> — Same as above\n\
+     <code>/events info &lt;id&gt;</code> — Show details for an event\n\
+     <code>/events enable &lt;id&gt;</code> — Enable a paused event\n\
+     <code>/events disable &lt;id&gt;</code> — Pause an event without deleting it\n\
+     <code>/events delete &lt;id&gt;</code> — Permanently delete an event\n\n\
+     Events are created by Claude using the <code>create_scheduled_event</code> MCP tool. \
+     They can send messages, prompt sessions, or post to the scratchpad on a cron schedule.\n\n\
+     <b>Examples</b>\n\
+     <code>/events</code> — see all scheduled events with their status\n\
+     <code>/events info abc12345</code> — see details and recent runs for event abc12345\n\
+     <code>/events disable abc12345</code> — pause an event temporarily"
 }
 
 fn topics_text() -> &'static str {
@@ -135,6 +155,7 @@ pub async fn handle_callback(bot: Bot, query: CallbackQuery) {
         CB_HELP_MCP    => (mcp_text(),    back_keyboard()),
         CB_HELP_CONFIG => (config_text(), back_keyboard()),
         CB_HELP_TOPICS => (topics_text(), back_keyboard()),
+        CB_HELP_EVENTS => (events_text(), back_keyboard()),
         CB_HELP_BACK   => (main_text(),   main_keyboard()),
         _              => return,
     };

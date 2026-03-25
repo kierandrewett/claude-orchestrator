@@ -149,6 +149,20 @@ fn print_event(ev: &OrchestratorEvent) {
         OrchestratorEvent::ClientDisconnected { client_id, hostname } => {
             println!("[client] 🔴 Disconnected: {client_id} ({hostname})");
         }
+        OrchestratorEvent::SchedulerMessage { task_id, text, event_name, .. } => {
+            println!("[{task_id}] 🕐 Scheduled message from '{event_name}': {text}");
+        }
+        OrchestratorEvent::ScheduledEventFired { event_id, event_name } => {
+            println!("[scheduler] ⚡ Event fired: '{event_name}' ({event_id})");
+        }
+        OrchestratorEvent::EventsList { entries, .. } => {
+            println!("Scheduled events ({}):", entries.len());
+            for e in entries {
+                let status = if e.enabled { "✅" } else { "⏸️" };
+                let next = e.next_run.as_deref().unwrap_or("none");
+                println!("  {status} {} — {} — next: {next}", e.name, e.schedule);
+            }
+        }
     }
 }
 

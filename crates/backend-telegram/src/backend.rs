@@ -184,6 +184,8 @@ impl MessagingBackend for TelegramBackend {
 
         // Last-sent MCP list message, so button presses and refreshes edit in place.
         let last_mcp_msg: crate::mcp::LastMcpMsg = Arc::new(Mutex::new(None));
+        // Last-sent events list message, so button presses and refreshes edit in place.
+        let last_events_msg: crate::events::LastEventsMsg = Arc::new(Mutex::new(None));
 
         // Restore scratchpad from persisted state, verifying the topic still exists.
         let needs_init = if let Some(tid) = persisted.scratchpad_thread_id {
@@ -244,6 +246,7 @@ impl MessagingBackend for TelegramBackend {
                 BotCommand::new("cost",      "Show usage and cost summary"),
                 BotCommand::new("config",    "Update a task config option"),
                 BotCommand::new("mcp",       "Manage MCP servers"),
+                BotCommand::new("events",    "View and manage scheduled events"),
                 BotCommand::new("init",      "Set up the Scratchpad topic"),
                 BotCommand::new("reconnect", "Reconnect to the orchestrator"),
             ];
@@ -278,9 +281,11 @@ impl MessagingBackend for TelegramBackend {
             let scratchpad_name = self.config.scratchpad_topic_name.clone();
             let state_dir_clone = state_dir.clone();
             let last_mcp_msg_spawn = Arc::clone(&last_mcp_msg);
+            let last_events_msg_spawn = Arc::clone(&last_events_msg);
 
             tokio::spawn(async move {
                 let last_mcp_msg = last_mcp_msg_spawn;
+                let last_events_msg = last_events_msg_spawn;
                 let message_handler = {
                     let bot_msg = bot_clone.clone();
                     let sender = sender.clone();
@@ -323,14 +328,19 @@ impl MessagingBackend for TelegramBackend {
                     let bot_cb = bot_clone.clone();
                     let sender_cb = sender.clone();
                     let last_mcp_msg_cb = Arc::clone(&last_mcp_msg);
+                    let last_events_msg_cb = Arc::clone(&last_events_msg);
                     move |query: CallbackQuery| {
                         let bot_cb = bot_cb.clone();
                         let sender_cb = sender_cb.clone();
                         let last_mcp_msg_cb = Arc::clone(&last_mcp_msg_cb);
+                        let last_events_msg_cb = Arc::clone(&last_events_msg_cb);
                         async move {
                             match query.data.as_deref() {
                                 Some(d) if d.starts_with("mcp:") => {
                                     crate::mcp::handle_callback(bot_cb, query, sender_cb, last_mcp_msg_cb).await;
+                                }
+                                Some(d) if d.starts_with("evt:") => {
+                                    crate::events::handle_callback(bot_cb, query, sender_cb, last_events_msg_cb).await;
                                 }
                                 _ => {
                                     help::handle_callback(bot_cb, query).await;
@@ -386,7 +396,7 @@ impl MessagingBackend for TelegramBackend {
 
             let mut states = task_states.lock().await;
             let mut t2t = thread_to_task.lock().await;
-            handle_orch_event(&bot, group_id, &event, &mut states, &mut t2t, &state_dir, &hidden_tools, &topic_icon_cache, &last_mcp_msg).await;
+            handle_orch_event(&bot, group_id, &event, &mut states, &mut t2t, &state_dir, &hidden_tools, &topic_icon_cache, &last_mcp_msg, &last_events_msg).await;
         }
     }
 }
@@ -426,6 +436,7 @@ async fn handle_orch_event(
     hidden_tools: &[String],
     topic_icon_cache: &HashMap<String, String>,
     last_mcp_msg: &crate::mcp::LastMcpMsg,
+    last_events_msg: &crate::events::LastEventsMsg,
 ) {
     match event {
         OrchestratorEvent::TaskCreated { task_id, name, initial_prompt, .. } => {
@@ -617,7 +628,6 @@ async fn handle_orch_event(
             let state = states
                 .entry(task_id.0.clone())
                 .or_insert_with(|| TaskTopicState::new(None));
-            let thread_id = state.thread_id;
             let name = std::mem::take(&mut state.pending_tool_name);
             let summary = std::mem::take(&mut state.pending_tool_summary);
             let was_hidden = std::mem::replace(&mut state.pending_tool_hidden, false);
@@ -665,7 +675,7 @@ async fn handle_orch_event(
 
         OrchestratorEvent::TurnComplete {
             task_id,
-            usage,
+            usage: _,
             duration_secs,
             trigger_ref,
         } => {
@@ -902,6 +912,21 @@ async fn handle_orch_event(
             }
         }
 
+        OrchestratorEvent::EventsList { entries, trigger_ref } => {
+            let mut guard = last_events_msg.lock().await;
+            if let Some((chat_id, msg_id)) = *guard {
+                crate::events::edit_events_list(bot, chat_id, msg_id, entries).await;
+            } else {
+                let thread_id = telegram_thread_id(trigger_ref);
+                let reply_to = telegram_msg_id(trigger_ref);
+                if let Some(msg_id) =
+                    crate::events::send_events_list(bot, group_id, thread_id, reply_to, entries).await
+                {
+                    *guard = Some((group_id, msg_id));
+                }
+            }
+        }
+
         OrchestratorEvent::ClientConnected { hostname, .. } => {
             let thread_id = states
                 .get("scratchpad")
@@ -914,6 +939,19 @@ async fn handle_orch_event(
                 .get("scratchpad")
                 .and_then(|s| s.thread_id);
             send_text_reply(bot, group_id, thread_id, &format!("🔴 Client disconnected: <code>{}</code>", crate::formatting::escape_html(hostname)), None, false).await;
+        }
+
+        OrchestratorEvent::SchedulerMessage { task_id, text, .. } => {
+            let thread_id = states
+                .get(&task_id.0)
+                .and_then(|s| s.thread_id);
+            use crate::formatting::escape_html;
+            let html = format!("🕐 {}", escape_html(text));
+            send_text_reply(bot, group_id, thread_id, &html, None, true).await;
+        }
+
+        OrchestratorEvent::ScheduledEventFired { .. } => {
+            // Silently ignored — SchedulerMessage is the visible event for the user.
         }
     }
 }

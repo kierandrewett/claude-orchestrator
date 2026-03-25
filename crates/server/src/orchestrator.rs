@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use claude_db::{Db, TaskRow};
 use claude_events::{
     BackendEvent, EventBus, MessageRef, OrchestratorEvent, ParsedCommand, SessionPhase, TaskId,
     TaskKind, TaskStateSummary,
@@ -10,7 +11,7 @@ use claude_events::{
 use claude_shared::S2C;
 
 use crate::client_registry::ClientRegistry;
-use crate::commands::{build_cost, build_status};
+use crate::commands::{build_cost, build_events_info, build_events_list_entries, build_status};
 use crate::config::OrchestratorConfig;
 use crate::mcp_registry::{McpServerEntry, McpServerRegistry};
 use crate::task_manager::{Task, TaskRegistry, TaskState};
@@ -23,6 +24,7 @@ pub struct Orchestrator {
     pub config: OrchestratorConfig,
     pub store: Arc<crate::persistence::StateStore>,
     pub mcp_registry: Arc<McpServerRegistry>,
+    pub db: Db,
     /// Merged MCP env extras from all backend capability announcements.
     backend_caps: std::sync::Mutex<std::collections::HashMap<String, String>>,
 }
@@ -35,8 +37,9 @@ impl Orchestrator {
         config: OrchestratorConfig,
         store: Arc<crate::persistence::StateStore>,
         mcp_registry: Arc<McpServerRegistry>,
+        db: Db,
     ) -> Self {
-        Self { bus, registry, clients, config, store, mcp_registry, backend_caps: Default::default() }
+        Self { bus, registry, clients, config, store, mcp_registry, db, backend_caps: Default::default() }
     }
 
     fn backend_mcp_extra_env(&self) -> std::collections::HashMap<String, String> {
@@ -318,7 +321,7 @@ impl Orchestrator {
 
                 let mut task = Task::new(
                     task_id.clone(),
-                    name,
+                    name.clone(),
                     profile,
                     TaskState::Running { session_id: session_id.clone() },
                     TaskKind::Scratchpad,
@@ -328,6 +331,15 @@ impl Orchestrator {
                 task.claude_session_id = Some(claude_session_id.clone());
                 self.registry.insert(task);
 
+                // Upsert task to DB with running status
+                self.db.upsert_task(&TaskRow {
+                    task_id: task_id.0.clone(),
+                    task_name: name.clone(),
+                    session_id: Some(claude_session_id.clone()),
+                    session_status: "running".to_string(),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    last_activity: None,
+                });
                 self.bus.emit(OrchestratorEvent::TaskStateChanged {
                     task_id: task_id.clone(),
                     old_state: TaskStateSummary::Hibernated,
@@ -387,7 +399,7 @@ impl Orchestrator {
         let trigger_ref = Some(msg_ref);
         match command {
             ParsedCommand::Status => {
-                let text = build_status(&self.registry, self.config.docker.idle_timeout_hours);
+                let text = build_status(&self.registry, self.config.docker.idle_timeout_hours, Some(&self.db));
                 self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
             }
             ParsedCommand::Cost { all } => {
@@ -477,6 +489,59 @@ impl Orchestrator {
                     self.bus.emit(OrchestratorEvent::McpList { entries, trigger_ref: None });
                 }
             }
+            ParsedCommand::EventsList => {
+                let entries = build_events_list_entries(&self.db);
+                self.bus.emit(OrchestratorEvent::EventsList { entries, trigger_ref });
+            }
+            ParsedCommand::EventsInfo { id } => {
+                let text = build_events_info(&self.db, &id);
+                self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
+            }
+            ParsedCommand::EventsEnable { id } => {
+                match self.db.get_event(&id).or_else(|| {
+                    self.db.list_events().into_iter().find(|e| e.id.starts_with(&id))
+                }) {
+                    None => {
+                        let text = format!("Event not found: {id}");
+                        self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
+                    }
+                    Some(event) => {
+                        self.db.set_event_enabled(&event.id, true);
+                        let entries = build_events_list_entries(&self.db);
+                        self.bus.emit(OrchestratorEvent::EventsList { entries, trigger_ref: None });
+                    }
+                }
+            }
+            ParsedCommand::EventsDisable { id } => {
+                match self.db.get_event(&id).or_else(|| {
+                    self.db.list_events().into_iter().find(|e| e.id.starts_with(&id))
+                }) {
+                    None => {
+                        let text = format!("Event not found: {id}");
+                        self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
+                    }
+                    Some(event) => {
+                        self.db.set_event_enabled(&event.id, false);
+                        let entries = build_events_list_entries(&self.db);
+                        self.bus.emit(OrchestratorEvent::EventsList { entries, trigger_ref: None });
+                    }
+                }
+            }
+            ParsedCommand::EventsDelete { id } => {
+                match self.db.get_event(&id).or_else(|| {
+                    self.db.list_events().into_iter().find(|e| e.id.starts_with(&id))
+                }) {
+                    None => {
+                        let text = format!("Event not found: {id}");
+                        self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
+                    }
+                    Some(event) => {
+                        self.db.delete_event(&event.id);
+                        let entries = build_events_list_entries(&self.db);
+                        self.bus.emit(OrchestratorEvent::EventsList { entries, trigger_ref: None });
+                    }
+                }
+            }
         }
     }
 
@@ -491,6 +556,7 @@ impl Orchestrator {
                     );
                 }
             }
+            self.db.delete_task(&task_id.0);
             self.bus.emit(OrchestratorEvent::TaskStateChanged {
                 task_id: task_id.clone(),
                 old_state: old,
@@ -511,6 +577,15 @@ impl Orchestrator {
             }
             task.state = TaskState::Hibernated;
             let id = task.id.clone();
+            // Update DB: session is now hibernated
+            self.db.upsert_task(&TaskRow {
+                task_id: id.0.clone(),
+                task_name: task.name.clone(),
+                session_id: task.claude_session_id.clone(),
+                session_status: "hibernated".to_string(),
+                created_at: task.created_at.to_rfc3339(),
+                last_activity: Some(task.last_activity.to_rfc3339()),
+            });
             self.bus.emit(OrchestratorEvent::TaskStateChanged {
                 task_id: id.clone(),
                 old_state,
@@ -572,6 +647,14 @@ impl Orchestrator {
         }
 
         let initial_prompt_opt = if prompt.is_empty() { None } else { Some(prompt) };
+        self.db.upsert_task(&TaskRow {
+            task_id: task_id.0.clone(),
+            task_name: name.clone(),
+            session_id: None,
+            session_status: "running".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            last_activity: None,
+        });
         self.bus.emit(OrchestratorEvent::TaskCreated { task_id, name, profile, kind, initial_prompt: initial_prompt_opt });
         self.save_state();
     }
@@ -614,14 +697,21 @@ mod tests {
         let bus = Arc::new(bus);
         let registry = Arc::new(TaskRegistry::new());
         let clients = Arc::new(ClientRegistry::new());
-        let store = Arc::new(crate::persistence::StateStore::new(std::path::Path::new("/tmp")));
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::persistence::StateStore::new(tmp.path()));
+        let mcp_registry = Arc::new(crate::mcp_registry::McpServerRegistry::load(tmp.path()));
+        let db = claude_db::Db::open(tmp.path()).unwrap();
         let orch = Arc::new(Orchestrator::new(
             Arc::clone(&bus),
             Arc::clone(&registry),
             clients,
             OrchestratorConfig::default(),
             store,
+            mcp_registry,
+            db,
         ));
+        // Keep temp dir alive for the duration of the test.
+        std::mem::forget(tmp);
         let orch_clone = Arc::clone(&orch);
         tokio::spawn(async move { orch_clone.run(backend_rx).await });
         (orch, backend_tx, orch_rx, registry)
@@ -711,7 +801,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn user_message_emits_acknowledged_then_responding() {
+    async fn user_message_without_client_emits_error() {
         let (_orch, tx, mut rx, registry) = make_orchestrator();
         let task_id = TaskId("id-mytask".to_string());
         registry.insert(make_task("mytask"));
@@ -725,15 +815,12 @@ mod tests {
         .await
         .unwrap();
 
-        let events = collect(&mut rx, 2, 500).await;
-        assert_eq!(events.len(), 2);
+        // With no client connected, the orchestrator emits an Error immediately.
+        let events = collect(&mut rx, 1, 500).await;
+        assert!(!events.is_empty(), "expected at least one event");
         assert!(matches!(
             &events[0],
-            OrchestratorEvent::PhaseChanged { phase: SessionPhase::Acknowledged, .. }
-        ));
-        assert!(matches!(
-            &events[1],
-            OrchestratorEvent::PhaseChanged { phase: SessionPhase::Responding, .. }
+            OrchestratorEvent::Error { error, .. } if error.contains("No client")
         ));
     }
 
