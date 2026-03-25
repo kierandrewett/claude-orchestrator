@@ -11,22 +11,41 @@ fn format_cost(usage: &UsageStats) -> String {
     )
 }
 
+/// Format a duration as "4h 20m 2s", omitting leading zero units.
+fn format_duration(secs: u64) -> String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    match (h, m, s) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, s) => format!("{m}m {s}s"),
+        (h, m, s) => format!("{h}h {m}m {s}s"),
+    }
+}
+
 /// Build a /status response text.
-pub fn build_status(registry: &TaskRegistry) -> String {
+pub fn build_status(registry: &TaskRegistry, idle_timeout_hours: u64) -> String {
     let ids = registry.all_ids();
     if ids.is_empty() {
         return "No active tasks.".to_string();
     }
 
+    let now = chrono::Utc::now();
+    let idle_threshold_secs = idle_timeout_hours * 3600;
+
     let mut lines = vec!["Tasks:".to_string()];
     for id in &ids {
         if let Some(line) = registry.with(id, |t| {
-            let emoji = match t.state.summary() {
-                TaskStateSummary::Running => "🟢",
-                TaskStateSummary::Hibernated => "💤",
-                TaskStateSummary::Dead => "💀",
+            let (emoji, suffix) = match t.state.summary() {
+                TaskStateSummary::Running => {
+                    let elapsed = (now - t.last_activity).num_seconds().max(0) as u64;
+                    let remaining = idle_threshold_secs.saturating_sub(elapsed);
+                    ("🟢", format!(" — sleeps in {}", format_duration(remaining)))
+                }
+                TaskStateSummary::Hibernated => ("💤", String::new()),
+                TaskStateSummary::Dead => ("💀", String::new()),
             };
-            format!("{emoji} {} — {} ({})", t.name, t.profile, format_cost(&t.usage))
+            format!("{emoji} {} — {}{} ({})", t.name, t.profile, suffix, format_cost(&t.usage))
         }) {
             lines.push(line);
         }

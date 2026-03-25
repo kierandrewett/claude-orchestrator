@@ -328,6 +328,11 @@ impl Orchestrator {
                 task.claude_session_id = Some(claude_session_id.clone());
                 self.registry.insert(task);
 
+                self.bus.emit(OrchestratorEvent::TaskStateChanged {
+                    task_id: task_id.clone(),
+                    old_state: TaskStateSummary::Hibernated,
+                    new_state: TaskStateSummary::Running,
+                });
                 self.bus.emit(OrchestratorEvent::PhaseChanged {
                     task_id: task_id.clone(),
                     phase: SessionPhase::Starting,
@@ -382,7 +387,7 @@ impl Orchestrator {
         let trigger_ref = Some(msg_ref);
         match command {
             ParsedCommand::Status => {
-                let text = build_status(&self.registry);
+                let text = build_status(&self.registry, self.config.docker.idle_timeout_hours);
                 self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
             }
             ParsedCommand::Cost { all } => {
