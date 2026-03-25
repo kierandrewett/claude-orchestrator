@@ -163,6 +163,12 @@ impl Runner for NativeRunner {
             Err(e) => warn!("failed to serialise MCP config: {e}"),
         }
 
+        // Suppress Claude Code's built-in cron tools — our orchestrator MCP
+        // provides create/list/delete/enable/disable scheduled events instead.
+        if !disabled.contains("orchestrator") {
+            cmd.args(["--disallowedTools", "CronCreate,CronDelete,CronList"]);
+        }
+
         cmd.current_dir(&config.default_cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
