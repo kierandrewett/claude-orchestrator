@@ -70,7 +70,7 @@ pub enum TaskKind {
 
 // ── TaskStateSummary — serialisable snapshot of a task's state ─────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskStateSummary {
     Running,
     Hibernated,

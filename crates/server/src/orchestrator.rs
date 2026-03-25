@@ -162,6 +162,19 @@ impl Orchestrator {
             BackendEvent::CancelQueuedMessage { task_id, message_ref, .. } => {
                 self.cancel_queued_message(&task_id, message_ref).await;
             }
+            BackendEvent::SyncRequest => {
+                info!("orchestrator: SyncRequest — emitting current state for all tasks");
+                let ids = self.registry.all_ids();
+                for id in ids {
+                    if let Some(state) = self.registry.with(&id, |t| t.state.summary()) {
+                        self.bus.emit(OrchestratorEvent::TaskStateChanged {
+                            task_id: id,
+                            old_state: state,
+                            new_state: state,
+                        });
+                    }
+                }
+            }
         }
     }
 

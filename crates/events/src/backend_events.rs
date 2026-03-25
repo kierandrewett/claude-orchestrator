@@ -43,6 +43,10 @@ pub enum BackendEvent {
         source: BackendSource,
     },
 
+    /// Request the orchestrator to re-emit the current state of all tasks.
+    /// Sent by backends on startup so they can sync (e.g. rename hibernated topics).
+    SyncRequest,
+
     /// Backend-specific capability hints for the MCP helper.
     /// The orchestrator merges these into every new session's helper environment.
     BackendCapabilities {

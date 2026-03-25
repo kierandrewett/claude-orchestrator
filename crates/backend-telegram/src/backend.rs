@@ -222,27 +222,6 @@ impl MessagingBackend for TelegramBackend {
             info!("telegram: restored task topic thread_id={tid} for task {task_id}");
         }
 
-        // On startup, ensure hibernated tasks still show the 💤 suffix and active
-        // tasks do not (handles the case where the bot was offline during a state change).
-        {
-            let states_snap = task_states.lock().await;
-            for (task_id, tid) in &persisted.task_topics {
-                let thread_id = ThreadId(MessageId(*tid));
-                let hibernated = persisted.hibernated_tasks.contains(task_id);
-                let display_title = states_snap
-                    .get(task_id)
-                    .map(|s| s.display_title.clone())
-                    .unwrap_or_default();
-                let name = topic_display_name(&display_title, hibernated);
-                if !name.is_empty() {
-                    let bot_clone = bot.clone();
-                    tokio::spawn(async move {
-                        rename_topic_to(&bot_clone, group_id, thread_id, &name).await;
-                    });
-                }
-            }
-        }
-
         info!("telegram: backend started for group {group_id}");
 
         // Register the bot's command list with Telegram so they appear in the
@@ -352,6 +331,10 @@ impl MessagingBackend for TelegramBackend {
                     .await;
             });
         }
+
+        // Request the orchestrator to replay current task states so this backend
+        // can sync topic names (e.g. add/remove 💤 for hibernated tasks).
+        let _ = backend_sender.send(BackendEvent::SyncRequest).await;
 
         // --- Orchestrator event loop ---
         loop {
