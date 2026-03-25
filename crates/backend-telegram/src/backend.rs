@@ -374,15 +374,18 @@ impl MessagingBackend for TelegramBackend {
     }
 }
 
-/// Compute the Telegram topic display name for a task, appending " 💤" when hibernated.
-/// The leading emoji (used as topic icon) is stripped — it is set separately via icon_custom_emoji_id.
+/// Returns the Telegram topic name for a task.
+/// The leading icon emoji is stripped (it is set via icon_custom_emoji_id separately).
+/// " 💤" is appended when hibernated and stripped from the end when not.
 fn topic_display_name(display_title: &str, hibernated: bool) -> String {
-    let (_, text) = crate::formatting::split_emoji_from_title(display_title);
-    let base = if text.is_empty() { display_title.trim().to_string() } else { text };
+    let (_, name) = crate::formatting::split_emoji_from_title(display_title);
+    let name = if name.is_empty() { display_title.trim() } else { &name };
+    // Strip any existing 💤 suffix to avoid duplicates, then re-add if needed.
+    let name = name.trim_end_matches('💤').trim_end();
     if hibernated {
-        if base.is_empty() { "💤".to_string() } else { format!("{base} 💤") }
+        format!("{name} 💤")
     } else {
-        base
+        name.to_string()
     }
 }
 
