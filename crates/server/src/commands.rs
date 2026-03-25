@@ -1,4 +1,4 @@
-use claude_events::{TaskId, TaskStateSummary};
+use claude_events::{TaskId, TaskKind, TaskStateSummary};
 use claude_ndjson::UsageStats;
 
 use crate::task_manager::TaskRegistry;
@@ -38,9 +38,16 @@ pub fn build_status(registry: &TaskRegistry, idle_timeout_hours: u64) -> String 
         if let Some(line) = registry.with(id, |t| {
             let (emoji, suffix) = match t.state.summary() {
                 TaskStateSummary::Running => {
-                    let elapsed = (now - t.last_activity).num_seconds().max(0) as u64;
-                    let remaining = idle_threshold_secs.saturating_sub(elapsed);
-                    ("🟢", format!(" — sleeps in {}", format_duration(remaining)))
+                    // Idle watchdog only applies to Job tasks; scratchpad hibernates
+                    // immediately after each response so a countdown would be misleading.
+                    let countdown = if t.kind == TaskKind::Job {
+                        let elapsed = (now - t.last_activity).num_seconds().max(0) as u64;
+                        let remaining = idle_threshold_secs.saturating_sub(elapsed);
+                        format!(" — sleeps in {}", format_duration(remaining))
+                    } else {
+                        String::new()
+                    };
+                    ("🟢", countdown)
                 }
                 TaskStateSummary::Hibernated => ("💤", String::new()),
                 TaskStateSummary::Dead => ("💀", String::new()),
