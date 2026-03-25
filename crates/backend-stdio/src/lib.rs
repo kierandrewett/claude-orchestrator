@@ -135,6 +135,14 @@ fn print_event(ev: &OrchestratorEvent) {
         OrchestratorEvent::ConversationRenamed { task_id, title } => {
             println!("[{task_id}] ✏️  Conversation renamed to '{title}'");
         }
+        OrchestratorEvent::McpList { entries, .. } => {
+            println!("MCP servers:");
+            for e in entries {
+                let status = if e.enabled { "✅" } else { "❌" };
+                let detail = e.command.as_deref().unwrap_or("built-in");
+                println!("  {status} {} — {detail}", e.name);
+            }
+        }
         OrchestratorEvent::ClientConnected { client_id, hostname } => {
             println!("[client] 🟢 Connected: {client_id} ({hostname})");
         }

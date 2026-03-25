@@ -182,6 +182,9 @@ impl MessagingBackend for TelegramBackend {
         let thread_to_task: Arc<Mutex<HashMap<i32, String>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
+        // Last-sent MCP list message, so button presses and refreshes edit in place.
+        let last_mcp_msg: crate::mcp::LastMcpMsg = Arc::new(Mutex::new(None));
+
         // Restore scratchpad from persisted state, verifying the topic still exists.
         let needs_init = if let Some(tid) = persisted.scratchpad_thread_id {
             use teloxide::prelude::Requester;
@@ -274,8 +277,10 @@ impl MessagingBackend for TelegramBackend {
             let task_states_clone = Arc::clone(&task_states);
             let scratchpad_name = self.config.scratchpad_topic_name.clone();
             let state_dir_clone = state_dir.clone();
+            let last_mcp_msg_spawn = Arc::clone(&last_mcp_msg);
 
             tokio::spawn(async move {
+                let last_mcp_msg = last_mcp_msg_spawn;
                 let message_handler = {
                     let bot_msg = bot_clone.clone();
                     let sender = sender.clone();
@@ -316,10 +321,21 @@ impl MessagingBackend for TelegramBackend {
 
                 let callback_handler = {
                     let bot_cb = bot_clone.clone();
+                    let sender_cb = sender.clone();
+                    let last_mcp_msg_cb = Arc::clone(&last_mcp_msg);
                     move |query: CallbackQuery| {
                         let bot_cb = bot_cb.clone();
+                        let sender_cb = sender_cb.clone();
+                        let last_mcp_msg_cb = Arc::clone(&last_mcp_msg_cb);
                         async move {
-                            help::handle_callback(bot_cb, query).await;
+                            match query.data.as_deref() {
+                                Some(d) if d.starts_with("mcp:") => {
+                                    crate::mcp::handle_callback(bot_cb, query, sender_cb, last_mcp_msg_cb).await;
+                                }
+                                _ => {
+                                    help::handle_callback(bot_cb, query).await;
+                                }
+                            }
                             Ok::<_, anyhow::Error>(())
                         }
                     }
@@ -370,7 +386,7 @@ impl MessagingBackend for TelegramBackend {
 
             let mut states = task_states.lock().await;
             let mut t2t = thread_to_task.lock().await;
-            handle_orch_event(&bot, group_id, &event, &mut states, &mut t2t, &state_dir, &hidden_tools, &topic_icon_cache).await;
+            handle_orch_event(&bot, group_id, &event, &mut states, &mut t2t, &state_dir, &hidden_tools, &topic_icon_cache, &last_mcp_msg).await;
         }
     }
 }
@@ -409,6 +425,7 @@ async fn handle_orch_event(
     state_dir: &std::path::Path,
     hidden_tools: &[String],
     topic_icon_cache: &HashMap<String, String>,
+    last_mcp_msg: &crate::mcp::LastMcpMsg,
 ) {
     match event {
         OrchestratorEvent::TaskCreated { task_id, name, initial_prompt, .. } => {
@@ -864,6 +881,23 @@ async fn handle_orch_event(
                             Err(e) => warn!("telegram: ConversationRenamed: failed to rename topic: {e}"),
                         }
                     });
+                }
+            }
+        }
+
+        OrchestratorEvent::McpList { entries, trigger_ref } => {
+            let mut guard = last_mcp_msg.lock().await;
+            if let Some((chat_id, msg_id)) = *guard {
+                // Edit the existing list message in place.
+                crate::mcp::edit_mcp_list(bot, chat_id, msg_id, entries).await;
+            } else {
+                // Send a new message in the thread the command came from.
+                let thread_id = telegram_thread_id(trigger_ref);
+                let reply_to = telegram_msg_id(trigger_ref);
+                if let Some(msg_id) =
+                    crate::mcp::send_mcp_list(bot, group_id, thread_id, reply_to, entries).await
+                {
+                    *guard = Some((group_id, msg_id));
                 }
             }
         }

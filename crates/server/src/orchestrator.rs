@@ -428,42 +428,54 @@ impl Orchestrator {
                 self.create_task(profile, prompt, TaskKind::Job).await;
             }
             ParsedCommand::McpList => {
-                let text = self.mcp_registry.list_display();
-                self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
+                let entries = self.mcp_registry.entries();
+                self.bus.emit(OrchestratorEvent::McpList { entries, trigger_ref });
             }
             ParsedCommand::McpAdd { name, command, args } => {
-                let text = match self.mcp_registry.add(McpServerEntry {
+                let result = self.mcp_registry.add(McpServerEntry {
                     name: name.clone(),
                     command: command.clone(),
                     args: args.clone(),
                     env: Default::default(),
                     disabled: false,
-                }) {
-                    Ok(()) => format!("Added MCP server '{name}' ({command})"),
-                    Err(e) => format!("Error: {e}"),
-                };
-                self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
+                });
+                if let Err(e) = result {
+                    let text = format!("Error: {e}");
+                    self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
+                } else {
+                    let entries = self.mcp_registry.entries();
+                    self.bus.emit(OrchestratorEvent::McpList { entries, trigger_ref });
+                }
             }
             ParsedCommand::McpRemove { name } => {
-                let text = match self.mcp_registry.remove(&name) {
-                    Ok(()) => format!("Removed MCP server '{name}'"),
-                    Err(e) => format!("Error: {e}"),
-                };
-                self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
+                let result = self.mcp_registry.remove(&name);
+                if let Err(e) = result {
+                    let text = format!("Error: {e}");
+                    self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
+                } else {
+                    let entries = self.mcp_registry.entries();
+                    self.bus.emit(OrchestratorEvent::McpList { entries, trigger_ref });
+                }
             }
             ParsedCommand::McpDisable { name } => {
-                let text = match self.mcp_registry.disable(&name) {
-                    Ok(()) => format!("Disabled MCP server '{name}'"),
-                    Err(e) => format!("Error: {e}"),
-                };
-                self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
+                let result = self.mcp_registry.disable(&name);
+                if let Err(e) = result {
+                    let text = format!("Error: {e}");
+                    self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
+                } else {
+                    let entries = self.mcp_registry.entries();
+                    self.bus.emit(OrchestratorEvent::McpList { entries, trigger_ref: None });
+                }
             }
             ParsedCommand::McpEnable { name } => {
-                let text = match self.mcp_registry.enable(&name) {
-                    Ok(()) => format!("Enabled MCP server '{name}'"),
-                    Err(e) => format!("Error: {e}"),
-                };
-                self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
+                let result = self.mcp_registry.enable(&name);
+                if let Err(e) = result {
+                    let text = format!("Error: {e}");
+                    self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
+                } else {
+                    let entries = self.mcp_registry.entries();
+                    self.bus.emit(OrchestratorEvent::McpList { entries, trigger_ref: None });
+                }
             }
         }
     }

@@ -77,6 +77,19 @@ pub enum TaskStateSummary {
     Dead,
 }
 
+// ── McpEntry — snapshot of a single MCP server ────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpEntry {
+    pub name: String,
+    pub is_builtin: bool,
+    pub enabled: bool,
+    /// None for built-in servers.
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
 // ── TaskSummary — lightweight info about a task for LLM context ───────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

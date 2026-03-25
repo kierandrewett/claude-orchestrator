@@ -144,6 +144,30 @@ impl McpServerRegistry {
         Ok(())
     }
 
+    /// Return a structured snapshot of all MCP servers for UI rendering.
+    pub fn entries(&self) -> Vec<claude_events::McpEntry> {
+        let data = self.data.lock().unwrap();
+        let disabled_set: std::collections::HashSet<&str> =
+            data.disabled.iter().map(|s| s.as_str()).collect();
+        let mut entries = vec![claude_events::McpEntry {
+            name: "orchestrator".to_string(),
+            is_builtin: true,
+            enabled: !disabled_set.contains("orchestrator"),
+            command: None,
+            args: vec![],
+        }];
+        for s in &data.custom {
+            entries.push(claude_events::McpEntry {
+                name: s.name.clone(),
+                is_builtin: false,
+                enabled: !s.disabled && !disabled_set.contains(s.name.as_str()),
+                command: Some(s.command.clone()),
+                args: s.args.clone(),
+            });
+        }
+        entries
+    }
+
     /// Build a status display string for the /mcp list command.
     pub fn list_display(&self) -> String {
         let data = self.data.lock().unwrap();

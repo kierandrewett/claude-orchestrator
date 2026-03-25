@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{MessageRef, SessionPhase, TaskId, TaskKind, TaskStateSummary};
+use crate::types::{McpEntry, MessageRef, SessionPhase, TaskId, TaskKind, TaskStateSummary};
 use claude_ndjson::UsageStats;
 
 /// Events emitted by the orchestrator core, broadcast to all backends.
@@ -126,6 +126,13 @@ pub enum OrchestratorEvent {
         task_id: Option<TaskId>,
         text: String,
         /// The command message that triggered this response (for reply threading).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        trigger_ref: Option<MessageRef>,
+    },
+
+    /// Current state of all MCP servers (sent in response to /mcp list and after mutations).
+    McpList {
+        entries: Vec<McpEntry>,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         trigger_ref: Option<MessageRef>,
     },
