@@ -42,6 +42,9 @@ struct TelegramState {
     /// Latest conversation title per task_id (from ConversationRenamed). Persisted for /status links.
     #[serde(default)]
     task_titles: std::collections::HashMap<String, String>,
+    /// Task IDs that are currently hibernated. Used to restore 💤 topic suffix on startup.
+    #[serde(default)]
+    hibernated_tasks: std::collections::HashSet<String>,
 }
 
 impl TelegramState {
@@ -219,6 +222,27 @@ impl MessagingBackend for TelegramBackend {
             info!("telegram: restored task topic thread_id={tid} for task {task_id}");
         }
 
+        // On startup, ensure hibernated tasks still show the 💤 suffix and active
+        // tasks do not (handles the case where the bot was offline during a state change).
+        {
+            let states_snap = task_states.lock().await;
+            for (task_id, tid) in &persisted.task_topics {
+                let thread_id = ThreadId(MessageId(*tid));
+                let hibernated = persisted.hibernated_tasks.contains(task_id);
+                let display_title = states_snap
+                    .get(task_id)
+                    .map(|s| s.display_title.clone())
+                    .unwrap_or_default();
+                let name = topic_display_name(&display_title, hibernated);
+                if !name.is_empty() {
+                    let bot_clone = bot.clone();
+                    tokio::spawn(async move {
+                        rename_topic_to(&bot_clone, group_id, thread_id, &name).await;
+                    });
+                }
+            }
+        }
+
         info!("telegram: backend started for group {group_id}");
 
         // Register the bot's command list with Telegram so they appear in the
@@ -347,6 +371,28 @@ impl MessagingBackend for TelegramBackend {
             let mut t2t = thread_to_task.lock().await;
             handle_orch_event(&bot, group_id, &event, &mut states, &mut t2t, &state_dir, &hidden_tools, &topic_icon_cache).await;
         }
+    }
+}
+
+/// Compute the Telegram topic display name for a task, appending " 💤" when hibernated.
+/// The leading emoji (used as topic icon) is stripped — it is set separately via icon_custom_emoji_id.
+fn topic_display_name(display_title: &str, hibernated: bool) -> String {
+    let (_, text) = crate::formatting::split_emoji_from_title(display_title);
+    let base = if text.is_empty() { display_title.trim().to_string() } else { text };
+    if hibernated {
+        if base.is_empty() { "💤".to_string() } else { format!("{base} 💤") }
+    } else {
+        base
+    }
+}
+
+/// Rename a topic to `name`, silently ignoring TOPIC_NOT_MODIFIED.
+async fn rename_topic_to(bot: &Bot, group_id: ChatId, tid: ThreadId, name: &str) {
+    use teloxide::prelude::Requester;
+    match bot.edit_forum_topic(group_id, tid).name(name).await {
+        Ok(_) => info!("telegram: renamed topic to '{name}'"),
+        Err(e) if e.to_string().contains("TOPIC_NOT_MODIFIED") => {}
+        Err(e) => warn!("telegram: failed to rename topic to '{name}': {e}"),
     }
 }
 
@@ -681,12 +727,29 @@ async fn handle_orch_event(
                 .entry(task_id.0.clone())
                 .or_insert_with(|| TaskTopicState::new(None));
             let thread_id = state.thread_id;
+            let display_title = state.display_title.clone();
             let text = match new_state {
                 TaskStateSummary::Hibernated => format_hibernated().to_string(),
                 TaskStateSummary::Dead => "💀 Task stopped.".to_string(),
                 TaskStateSummary::Running => "🟢 Task resumed.".to_string(),
             };
             send_text_reply(bot, group_id, thread_id, &text, None, false).await;
+
+            // Append 💤 to the topic name when hibernating; remove it on resume/stop.
+            let hibernated = *new_state == TaskStateSummary::Hibernated;
+            let new_topic_name = topic_display_name(&display_title, hibernated);
+            if let Some(tid) = thread_id {
+                rename_topic_to(bot, group_id, tid, &new_topic_name).await;
+            }
+
+            // Persist the updated hibernation set.
+            let mut ts = TelegramState::load(state_dir);
+            if hibernated {
+                ts.hibernated_tasks.insert(task_id.0.clone());
+            } else {
+                ts.hibernated_tasks.remove(&task_id.0);
+            }
+            ts.save(state_dir);
         }
 
         OrchestratorEvent::Error {
