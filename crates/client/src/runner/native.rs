@@ -118,14 +118,16 @@ impl Runner for NativeRunner {
                 }
             }
             if let Some(ref token) = config.orchestrator_token {
-                let mut server = serde_json::Map::new();
-                server.insert("url".into(), serde_json::Value::String(url));
-                server.insert("headers".into(), serde_json::json!({
-                    "Authorization": format!("Bearer {token}")
+                mcp_servers.insert("orchestrator".to_string(), serde_json::json!({
+                    "type": "sse",
+                    "url": url,
+                    "headers": { "Authorization": format!("Bearer {token}") }
                 }));
-                mcp_servers.insert("orchestrator".to_string(), serde_json::Value::Object(server));
             } else {
-                mcp_servers.insert("orchestrator".to_string(), serde_json::json!({ "url": url }));
+                mcp_servers.insert("orchestrator".to_string(), serde_json::json!({
+                    "type": "sse",
+                    "url": url
+                }));
             }
         }
 
