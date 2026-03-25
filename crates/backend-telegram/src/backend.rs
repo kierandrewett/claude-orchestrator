@@ -895,17 +895,17 @@ async fn handle_orch_event(
             }
         }
 
-        OrchestratorEvent::McpList { entries, trigger_ref } => {
+        OrchestratorEvent::McpList { entries, session_tools, trigger_ref } => {
             let mut guard = last_mcp_msg.lock().await;
             if let Some((chat_id, msg_id)) = *guard {
                 // Edit the existing list message in place.
-                crate::mcp::edit_mcp_list(bot, chat_id, msg_id, entries).await;
+                crate::mcp::edit_mcp_list(bot, chat_id, msg_id, entries, session_tools).await;
             } else {
                 // Send a new message in the thread the command came from.
                 let thread_id = telegram_thread_id(trigger_ref);
                 let reply_to = telegram_msg_id(trigger_ref);
                 if let Some(msg_id) =
-                    crate::mcp::send_mcp_list(bot, group_id, thread_id, reply_to, entries).await
+                    crate::mcp::send_mcp_list(bot, group_id, thread_id, reply_to, entries, session_tools).await
                 {
                     *guard = Some((group_id, msg_id));
                 }

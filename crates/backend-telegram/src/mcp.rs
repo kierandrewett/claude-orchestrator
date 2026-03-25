@@ -9,6 +9,8 @@ use tracing::warn;
 
 use claude_events::{BackendEvent, BackendSource, McpEntry, MessageRef, ParsedCommand};
 
+const MCP_TOOL_PREFIX: &str = "mcp__orchestrator__";
+
 /// Shared reference to the last-sent MCP list message, used to edit in place.
 pub type LastMcpMsg = Arc<Mutex<Option<(ChatId, MessageId)>>>;
 
@@ -20,7 +22,7 @@ const CB_MCP_OFF_PREFIX: &str = "mcp:off:";
 
 // ── UI builders ───────────────────────────────────────────────────────────────
 
-fn build_text(entries: &[McpEntry]) -> String {
+pub fn build_text(entries: &[McpEntry], session_tools: &[String]) -> String {
     let mut lines = vec!["<b>🔧 MCP Servers</b>".to_string(), String::new()];
     for e in entries {
         let status = if e.enabled { "✅" } else { "❌" };
@@ -40,6 +42,20 @@ fn build_text(entries: &[McpEntry]) -> String {
             detail
         ));
     }
+
+    // Show tools active in the current session if available.
+    let orch_tools: Vec<&str> = session_tools
+        .iter()
+        .filter_map(|t| t.strip_prefix(MCP_TOOL_PREFIX))
+        .collect();
+    if !orch_tools.is_empty() {
+        lines.push(String::new());
+        lines.push("<b>Active orchestrator tools:</b>".to_string());
+        for tool in &orch_tools {
+            lines.push(format!("  • <code>{}</code>", crate::formatting::escape_html(tool)));
+        }
+    }
+
     lines.push(String::new());
     lines.push(
         "Press a server to toggle it. Use <code>/mcp add &lt;name&gt; &lt;cmd&gt; [args…]</code> \
@@ -80,9 +96,10 @@ pub async fn send_mcp_list(
     thread_id: Option<ThreadId>,
     reply_to: Option<i32>,
     entries: &[McpEntry],
+    session_tools: &[String],
 ) -> Option<MessageId> {
     let mut req = bot
-        .send_message(chat_id, build_text(entries))
+        .send_message(chat_id, build_text(entries, session_tools))
         .parse_mode(ParseMode::Html)
         .reply_markup(build_keyboard(entries));
     if let Some(tid) = thread_id {
@@ -102,9 +119,9 @@ pub async fn send_mcp_list(
 }
 
 /// Edit an existing MCP list message in place.
-pub async fn edit_mcp_list(bot: &Bot, chat_id: ChatId, message_id: MessageId, entries: &[McpEntry]) {
+pub async fn edit_mcp_list(bot: &Bot, chat_id: ChatId, message_id: MessageId, entries: &[McpEntry], session_tools: &[String]) {
     let _ = bot
-        .edit_message_text(chat_id, message_id, build_text(entries))
+        .edit_message_text(chat_id, message_id, build_text(entries, session_tools))
         .parse_mode(ParseMode::Html)
         .reply_markup(build_keyboard(entries))
         .await;

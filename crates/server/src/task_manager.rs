@@ -28,6 +28,8 @@ impl TaskState {
 #[derive(Debug, Clone, Default)]
 pub struct TaskConfig {
     pub show_thinking: bool,
+    /// Tool names available in the current session (from the most recent system/init event).
+    pub available_tools: Vec<String>,
 }
 
 // ── Task ──────────────────────────────────────────────────────────────────────

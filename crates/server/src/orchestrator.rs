@@ -441,7 +441,10 @@ impl Orchestrator {
             }
             ParsedCommand::McpList => {
                 let entries = self.mcp_registry.entries();
-                self.bus.emit(OrchestratorEvent::McpList { entries, trigger_ref });
+                let session_tools = task_id.as_ref()
+                    .and_then(|tid| self.registry.with(tid, |t| t.config.available_tools.clone()))
+                    .unwrap_or_default();
+                self.bus.emit(OrchestratorEvent::McpList { entries, session_tools, trigger_ref });
             }
             ParsedCommand::McpAdd { name, command, args } => {
                 let result = self.mcp_registry.add(McpServerEntry {
@@ -456,7 +459,7 @@ impl Orchestrator {
                     self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
                 } else {
                     let entries = self.mcp_registry.entries();
-                    self.bus.emit(OrchestratorEvent::McpList { entries, trigger_ref });
+                    self.bus.emit(OrchestratorEvent::McpList { entries, session_tools: vec![], trigger_ref });
                 }
             }
             ParsedCommand::McpRemove { name } => {
@@ -466,7 +469,7 @@ impl Orchestrator {
                     self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
                 } else {
                     let entries = self.mcp_registry.entries();
-                    self.bus.emit(OrchestratorEvent::McpList { entries, trigger_ref });
+                    self.bus.emit(OrchestratorEvent::McpList { entries, session_tools: vec![], trigger_ref });
                 }
             }
             ParsedCommand::McpDisable { name } => {
@@ -476,7 +479,7 @@ impl Orchestrator {
                     self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
                 } else {
                     let entries = self.mcp_registry.entries();
-                    self.bus.emit(OrchestratorEvent::McpList { entries, trigger_ref: None });
+                    self.bus.emit(OrchestratorEvent::McpList { entries, session_tools: vec![], trigger_ref: None });
                 }
             }
             ParsedCommand::McpEnable { name } => {
@@ -486,7 +489,7 @@ impl Orchestrator {
                     self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
                 } else {
                     let entries = self.mcp_registry.entries();
-                    self.bus.emit(OrchestratorEvent::McpList { entries, trigger_ref: None });
+                    self.bus.emit(OrchestratorEvent::McpList { entries, session_tools: vec![], trigger_ref: None });
                 }
             }
             ParsedCommand::EventsList => {

@@ -263,7 +263,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
         let reg = Arc::clone(&client_registry);
         let task_reg = Arc::clone(&registry);
         let b = Arc::clone(&bus);
-        let _token = config.server.client_token.clone();
+        let mcp_token = config.server.client_token.clone();
         let db_for_mcp = db.clone();
         tokio::spawn(async move {
             let session_api_state = SessionApiState {
@@ -276,6 +276,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
                 bus: Arc::clone(&b),
                 connections: std::sync::Arc::new(dashmap::DashMap::new()),
                 db: db_for_mcp,
+                token: mcp_token,
             };
 
             let app = Router::new()

@@ -177,13 +177,23 @@ async fn handle_c2s(
             let orch_events =
                 ndjson_to_orch_events(&task_id, &event, trigger_ref, show_thinking);
 
-            // If this is a result event, accumulate usage stats on the task.
-            if let Ok(ClaudeEvent::Result(ref result)) =
-                serde_json::from_value::<ClaudeEvent>(event.clone())
-            {
-                task_registry.with_mut(&task_id, |t| {
-                    t.usage.ingest(result);
-                });
+            // Side-effects on task state from specific event types.
+            if let Ok(ref ev) = serde_json::from_value::<ClaudeEvent>(event.clone()) {
+                match ev {
+                    ClaudeEvent::Result(result) => {
+                        task_registry.with_mut(&task_id, |t| t.usage.ingest(result));
+                    }
+                    ClaudeEvent::System(sys) => {
+                        // Capture available tool names from system/init so /mcp can show them.
+                        let tools: Vec<String> = sys.tools.iter()
+                            .filter_map(|t| t["name"].as_str().map(|s| s.to_string()))
+                            .collect();
+                        if !tools.is_empty() {
+                            task_registry.with_mut(&task_id, |t| t.config.available_tools = tools);
+                        }
+                    }
+                    _ => {}
+                }
             }
 
             for ev in orch_events {

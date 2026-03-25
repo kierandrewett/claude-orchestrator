@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -30,6 +30,8 @@ pub struct McpState {
     pub bus: Arc<EventBus>,
     pub connections: McpConnections,
     pub db: Db,
+    /// Required Bearer token, or None to allow unauthenticated access.
+    pub token: Option<String>,
 }
 
 /// GET /mcp?session_id=xxx
@@ -37,16 +39,26 @@ pub struct McpState {
 /// Opens an SSE stream for the MCP SSE transport. The first event tells the
 /// client where to POST messages; subsequent events carry JSON-RPC responses.
 pub async fn mcp_sse_handler(
+    headers: axum::http::HeaderMap,
     Query(params): Query<HashMap<String, String>>,
     State(state): State<McpState>,
-) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+) -> impl IntoResponse {
+    if !check_token_header(&state, &headers) {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
     let session_id = params.get("session_id").cloned().unwrap_or_default();
 
     let (tx, rx) = mpsc::channel::<String>(32);
     state.connections.insert(session_id.clone(), tx);
 
-    // The client will POST its JSON-RPC messages back to this same URL.
-    let post_url = format!("/mcp?session_id={session_id}");
+    // Reconstruct the query string so all params (session_id, suppress, …) are
+    // preserved in the POST URL the client will use.
+    let qs: String = params
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("&");
+    let post_url = format!("/mcp?{qs}");
 
     let endpoint_event = stream::once(future::ready(Ok::<_, Infallible>(
         Event::default().event("endpoint").data(post_url),
@@ -58,7 +70,7 @@ pub async fn mcp_sse_handler(
             .map(|data| (Ok::<_, Infallible>(Event::default().data(data)), rx))
     });
 
-    Sse::new(endpoint_event.chain(message_events)).keep_alive(KeepAlive::default())
+    Sse::new(endpoint_event.chain(message_events)).keep_alive(KeepAlive::default()).into_response()
 }
 
 /// POST /mcp?session_id=xxx
@@ -66,11 +78,23 @@ pub async fn mcp_sse_handler(
 /// Handles both SSE-transport POSTs (returns 202, sends response via SSE stream)
 /// and streamable-HTTP POSTs (returns JSON directly when no SSE connection exists).
 pub async fn mcp_post_handler(
+    headers: axum::http::HeaderMap,
     Query(params): Query<HashMap<String, String>>,
     State(state): State<McpState>,
     Json(req): Json<Value>,
 ) -> impl IntoResponse {
+    if !check_token_header(&state, &headers) {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
     let session_id = params.get("session_id").map(|s| s.as_str()).unwrap_or("");
+    let suppress_tools: HashSet<String> = params
+        .get("suppress")
+        .map(|s| s.split(',').filter(|t| !t.is_empty()).map(|t| t.to_string()).collect())
+        .unwrap_or_default();
+    let allowed_emojis: Vec<String> = params
+        .get("emojis")
+        .map(|s| s.split(',').filter(|e| !e.is_empty()).map(|e| e.to_string()).collect())
+        .unwrap_or_default();
     let method = req["method"].as_str().unwrap_or("");
 
     debug!("MCP {method} session={session_id}");
@@ -81,7 +105,7 @@ pub async fn mcp_post_handler(
     }
 
     let id = req.get("id").cloned();
-    let response = dispatch(&req, id, method, session_id, &state).await;
+    let response = dispatch(&req, id, method, session_id, &suppress_tools, &allowed_emojis, &state).await;
 
     // SSE transport: send via the open stream and return 202.
     if let Some(tx) = state.connections.get(session_id) {
@@ -98,7 +122,7 @@ pub async fn mcp_post_handler(
     Json(response).into_response()
 }
 
-async fn dispatch(req: &Value, id: Option<Value>, method: &str, session_id: &str, state: &McpState) -> Value {
+async fn dispatch(req: &Value, id: Option<Value>, method: &str, session_id: &str, suppress_tools: &HashSet<String>, allowed_emojis: &[String], state: &McpState) -> Value {
     match method {
         "initialize" => json!({
             "jsonrpc": "2.0",
@@ -112,11 +136,12 @@ async fn dispatch(req: &Value, id: Option<Value>, method: &str, session_id: &str
 
         "ping" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
 
-        "tools/list" => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "tools": [
+        "tools/list" => {
+            let mut resp = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "tools": [
                     {
                         "name": "rename_conversation",
                         "description": "Rename the current conversation in the chat backend (e.g. the Telegram topic name). Call this once after your first substantive response, when you have a clear sense of what this conversation is about.",
@@ -240,7 +265,17 @@ async fn dispatch(req: &Value, id: Option<Value>, method: &str, session_id: &str
                     }
                 ]
             }
-        }),
+            });
+            // Remove suppressed tools from the list.
+            if !suppress_tools.is_empty() {
+                if let Some(tools) = resp["result"]["tools"].as_array_mut() {
+                    tools.retain(|t| {
+                        !suppress_tools.contains(t["name"].as_str().unwrap_or(""))
+                    });
+                }
+            }
+            resp
+        }
 
         "tools/call" => {
             let name = req["params"]["name"].as_str().unwrap_or("");
@@ -250,6 +285,15 @@ async fn dispatch(req: &Value, id: Option<Value>, method: &str, session_id: &str
                         .as_str()
                         .unwrap_or("")
                         .to_string();
+                    if !allowed_emojis.is_empty() {
+                        let first = title.split_whitespace().next().unwrap_or("");
+                        if !allowed_emojis.iter().any(|e| e == first) {
+                            return mcp_err(id, &format!(
+                                "Invalid emoji. Title must begin with one of: {}\nPlease retry.",
+                                allowed_emojis.join(", ")
+                            ));
+                        }
+                    }
                     match state.registry.find_by_session_id(session_id) {
                         Some(task_id) => {
                             state.bus.emit(OrchestratorEvent::ConversationRenamed { task_id, title });
@@ -525,6 +569,17 @@ async fn dispatch(req: &Value, id: Option<Value>, method: &str, session_id: &str
             "id": id,
             "error": {"code": -32601, "message": "Method not found"}
         }),
+    }
+}
+
+fn check_token_header(state: &McpState, headers: &axum::http::HeaderMap) -> bool {
+    match &state.token {
+        None => true,
+        Some(expected) => headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map_or(false, |t| t == expected),
     }
 }
 

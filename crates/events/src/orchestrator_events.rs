@@ -140,6 +140,9 @@ pub enum OrchestratorEvent {
     /// Current state of all MCP servers (sent in response to /mcp list and after mutations).
     McpList {
         entries: Vec<McpEntry>,
+        /// Tool names available in the session that triggered this command (from system/init).
+        #[serde(default)]
+        session_tools: Vec<String>,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         trigger_ref: Option<MessageRef>,
     },

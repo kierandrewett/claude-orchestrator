@@ -90,15 +90,43 @@ impl Runner for NativeRunner {
         let mut mcp_servers = serde_json::Map::new();
 
         // Built-in orchestrator server (unless disabled).
+        // Uses URL-based (streamable HTTP) transport so all server-side tools
+        // (create_scheduled_event, list_tasks, rename_conversation, etc.) are
+        // available without duplicating them in the helper binary.
         if !disabled.contains("orchestrator") {
-            mcp_servers.insert(
-                "orchestrator".to_string(),
-                serde_json::json!({
-                    "command": helper_cmd,
-                    "args": ["mcp"],
-                    "env": mcp_env
-                }),
+            let mut url = format!(
+                "{}/mcp?session_id={}",
+                config.orchestrator_url.trim_end_matches('/'),
+                config.session_id,
             );
+            if !config.suppress_mcp_tools.is_empty() {
+                url.push_str(&format!("&suppress={}", config.suppress_mcp_tools.join(",")));
+            }
+            if let Some(emojis) = mcp_env.get("ORCHESTRATOR_ALLOWED_EMOJIS") {
+                if let serde_json::Value::String(e) = emojis {
+                    if !e.is_empty() {
+                        // URL-encode the emoji string (percent-encode non-ASCII).
+                        let encoded: String = e.bytes().flat_map(|b| {
+                            if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b',' {
+                                vec![b as char]
+                            } else {
+                                format!("%{:02X}", b).chars().collect()
+                            }
+                        }).collect();
+                        url.push_str(&format!("&emojis={encoded}"));
+                    }
+                }
+            }
+            if let Some(ref token) = config.orchestrator_token {
+                let mut server = serde_json::Map::new();
+                server.insert("url".into(), serde_json::Value::String(url));
+                server.insert("headers".into(), serde_json::json!({
+                    "Authorization": format!("Bearer {token}")
+                }));
+                mcp_servers.insert("orchestrator".to_string(), serde_json::Value::Object(server));
+            } else {
+                mcp_servers.insert("orchestrator".to_string(), serde_json::json!({ "url": url }));
+            }
         }
 
         // User-configured custom servers.
