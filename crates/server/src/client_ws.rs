@@ -185,8 +185,9 @@ async fn handle_c2s(
                     }
                     ClaudeEvent::System(sys) => {
                         // Capture available tool names from system/init so /mcp can show them.
+                        // Tools are plain strings in the ndjson format.
                         let tools: Vec<String> = sys.tools.iter()
-                            .filter_map(|t| t["name"].as_str().map(|s| s.to_string()))
+                            .filter_map(|t| t.as_str().map(|s| s.to_string()))
                             .collect();
                         if !tools.is_empty() {
                             task_registry.with_mut(&task_id, |t| t.config.available_tools = tools);
@@ -384,10 +385,7 @@ fn log_session_event(task_name: &str, event: &serde_json::Value) {
     match ev {
         ClaudeEvent::System(sys) => {
             let model = sys.extra.get("model").and_then(|v| v.as_str()).unwrap_or("?");
-            let tools_n = sys.extra.get("tools")
-                .and_then(|v| v.as_array())
-                .map(|a| a.len())
-                .unwrap_or(0);
+            let tools_n = sys.tools.len();
             let subtype = sys.extra.get("subtype").and_then(|v| v.as_str()).unwrap_or("init");
             info!(target: "ndjson", "← [{task_name}] system/{subtype} model={model} tools={tools_n}");
         }
