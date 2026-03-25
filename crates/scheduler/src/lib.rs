@@ -17,8 +17,8 @@ pub fn start(
     backend_tx: mpsc::Sender<BackendEvent>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        info!("scheduler: started, tick every 30s");
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        info!("scheduler: started, tick every 10s");
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
         loop {
             interval.tick().await;
             tick(&db, &bus, &backend_tx).await;
@@ -145,6 +145,14 @@ async fn execute_action(
                 }
                 _ => {}
             }
+
+            // Emit a visible attribution message so the user can see what triggered this.
+            bus.emit(OrchestratorEvent::SchedulerMessage {
+                task_id: TaskId(task_id.clone()),
+                text: format!("📅 Triggered by scheduled event: \"{}\"", event.name),
+                event_id: event.id.clone(),
+                event_name: event.name.clone(),
+            });
 
             // Inject as a UserMessage via the event bus
             // Use a synthetic source so the orchestrator knows it came from the scheduler

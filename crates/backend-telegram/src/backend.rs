@@ -914,16 +914,25 @@ async fn handle_orch_event(
 
         OrchestratorEvent::EventsList { entries, trigger_ref } => {
             let mut guard = last_events_msg.lock().await;
-            if let Some((chat_id, msg_id)) = *guard {
-                crate::events::edit_events_list(bot, chat_id, msg_id, entries).await;
-            } else {
-                let thread_id = telegram_thread_id(trigger_ref);
-                let reply_to = telegram_msg_id(trigger_ref);
-                if let Some(msg_id) =
-                    crate::events::send_events_list(bot, group_id, thread_id, reply_to, entries).await
-                {
-                    *guard = Some((group_id, msg_id));
+            // Button press (opaque_id starts with "btn:") or mutation auto-refresh (None)
+            // → edit the existing message in place.
+            // Direct /events command → always send a new message so the user gets
+            // visible feedback even when the list content hasn't changed.
+            let is_direct_command = trigger_ref
+                .as_ref()
+                .map_or(false, |r| !r.opaque_id.starts_with("btn:"));
+            if !is_direct_command {
+                if let Some((chat_id, msg_id)) = *guard {
+                    crate::events::edit_events_list(bot, chat_id, msg_id, entries).await;
+                    return;
                 }
+            }
+            let thread_id = telegram_thread_id(trigger_ref);
+            let reply_to = telegram_msg_id(trigger_ref);
+            if let Some(msg_id) =
+                crate::events::send_events_list(bot, group_id, thread_id, reply_to, entries).await
+            {
+                *guard = Some((group_id, msg_id));
             }
         }
 

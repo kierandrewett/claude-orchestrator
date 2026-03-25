@@ -166,12 +166,12 @@ async fn handle_c2s(
             let task_id = find_task_by_session(task_registry, &session_id);
             let Some(task_id) = task_id else { return };
 
-            let trigger_ref = task_registry
-                .with(&task_id, |t| t.current_trigger.clone())
-                .flatten();
-            let show_thinking = task_registry
-                .with(&task_id, |t| t.config.show_thinking)
-                .unwrap_or(false);
+            let (trigger_ref, show_thinking, task_name) = task_registry
+                .with(&task_id, |t| (t.current_trigger.clone(), t.config.show_thinking, t.name.clone()))
+                .unwrap_or_default();
+
+            // Log ndjson events to match client-side logging format.
+            log_session_event(&task_name, &event);
 
             // Parse NDJSON event and emit orchestrator events.
             let orch_events =
@@ -364,4 +364,45 @@ fn ndjson_to_orch_events(
     }
 
     out
+}
+
+/// Log an ndjson session event in the same format as the client daemon uses,
+/// so server logs contain the same session-level detail.
+fn log_session_event(task_name: &str, event: &serde_json::Value) {
+    let Ok(ev) = serde_json::from_value::<ClaudeEvent>(event.clone()) else { return };
+
+    match ev {
+        ClaudeEvent::System(sys) => {
+            let model = sys.extra.get("model").and_then(|v| v.as_str()).unwrap_or("?");
+            let tools_n = sys.extra.get("tools")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let subtype = sys.extra.get("subtype").and_then(|v| v.as_str()).unwrap_or("init");
+            info!(target: "ndjson", "← [{task_name}] system/{subtype} model={model} tools={tools_n}");
+        }
+        ClaudeEvent::ToolUse(tu) => {
+            let name = tu.name.as_deref().unwrap_or("?");
+            let input = serde_json::to_string(&tu.input).unwrap_or_default();
+            let input = if input.len() > 120 { &input[..120] } else { &input };
+            info!(target: "ndjson", "← [{task_name}] tool_use: {name} {input}");
+        }
+        ClaudeEvent::Assistant(msg) => {
+            let content = msg.message.as_ref().map(|m| m.content.as_slice()).unwrap_or(&[]);
+            for block in content {
+                if let ContentBlock::Text { text } = block {
+                    let preview = text.trim();
+                    let preview = if preview.len() > 120 { &preview[..120] } else { preview };
+                    info!(target: "ndjson", "← [{task_name}] assistant: \"{preview}\"");
+                    break;
+                }
+            }
+        }
+        ClaudeEvent::Result(r) => {
+            let turns = r.num_turns.unwrap_or(0);
+            let cost = r.total_cost_usd.unwrap_or(0.0);
+            info!(target: "ndjson", "← [{task_name}] result: {turns} turns, ${cost:.4}");
+        }
+        _ => {}
+    }
 }
