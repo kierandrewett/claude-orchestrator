@@ -35,7 +35,7 @@ RUN for dir in crates/server crates/client crates/ndjson crates/events crates/co
 
 # Now build for real
 COPY crates/ ./crates/
-RUN find crates/server/src crates/shared/src crates/events/src -name '*.rs' | xargs touch \
+RUN find crates/server/src crates/shared/src crates/events/src crates/db/src crates/scheduler/src -name '*.rs' | xargs touch \
     && cargo build --release -p claude-server
 
 # ── Stage 3: Minimal runtime image ────────────────────────────────────────────
