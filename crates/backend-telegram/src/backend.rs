@@ -13,6 +13,7 @@ use teloxide::types::{ChatId, MessageId, MessageReactionUpdated, ReactionType, T
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
+use crate::help;
 use crate::formatting::{
     format_error, format_thinking, format_tool_completed, format_tool_started,
     format_turn_complete, md_to_telegram_html, split_emoji_from_title,
@@ -232,6 +233,7 @@ impl MessagingBackend for TelegramBackend {
             use teloxide::prelude::Requester;
             use teloxide::types::BotCommand;
             let commands = vec![
+                BotCommand::new("help",      "Show available commands"),
                 BotCommand::new("status",    "List all tasks"),
                 BotCommand::new("cancel",    "Interrupt the current Claude response"),
                 BotCommand::new("stop",      "Stop the current (or specified) task"),
@@ -312,6 +314,17 @@ impl MessagingBackend for TelegramBackend {
                     }
                 };
 
+                let callback_handler = {
+                    let bot_cb = bot_clone.clone();
+                    move |query: CallbackQuery| {
+                        let bot_cb = bot_cb.clone();
+                        async move {
+                            help::handle_callback(bot_cb, query).await;
+                            Ok::<_, anyhow::Error>(())
+                        }
+                    }
+                };
+
                 let handler = dptree::entry()
                     .branch(
                         Update::filter_message()
@@ -325,6 +338,9 @@ impl MessagingBackend for TelegramBackend {
                     )
                     .branch(
                         Update::filter_message_reaction_updated().endpoint(reaction_handler),
+                    )
+                    .branch(
+                        Update::filter_callback_query().endpoint(callback_handler),
                     );
 
                 teloxide::dispatching::Dispatcher::builder(bot_clone, handler)
@@ -1054,6 +1070,12 @@ async fn handle_incoming(
                 }
             }
         }
+        return;
+    }
+
+    // Handle /help before routing to orchestrator — it's backend-local.
+    if msg.text().map(|t| t.split('@').next().unwrap_or(t).trim() == "/help").unwrap_or(false) {
+        crate::help::send_help(&bot, group_id, msg.thread_id, Some(msg.id.0)).await;
         return;
     }
 
