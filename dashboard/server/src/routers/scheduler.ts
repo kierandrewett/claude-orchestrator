@@ -7,10 +7,11 @@ export interface ScheduledEvent {
     name: string;
     cron: string;
     enabled: boolean;
-    task_profile?: string;
-    prompt?: string;
+    mode?: string;
+    prompt?: string | null;
     next_run?: string | null;
     last_run?: string | null;
+    origin_task_name?: string;
 }
 
 export const schedulerRouter = router({

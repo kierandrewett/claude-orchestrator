@@ -385,6 +385,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
                 bus: Arc::clone(&b),
             };
 
+            let db_for_api = db_for_mcp.clone();
             let mcp_state = mcp::McpState {
                 registry: Arc::clone(&task_reg),
                 bus: Arc::clone(&b),
@@ -411,6 +412,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
             let internal_api_state = internal_api::InternalApiState {
                 registry: Arc::clone(&task_reg),
                 backend_tx: b.backend_sender(),
+                db: db_for_api,
             };
 
             let app = Router::new()
