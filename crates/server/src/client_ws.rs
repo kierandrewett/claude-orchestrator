@@ -43,6 +43,20 @@ pub async fn handle_client_ws(
         }
     });
 
+    // Ping task: send a ping every 30 s to keep the connection alive through proxies.
+    let ws_tx_ping = Arc::clone(&ws_tx);
+    let pinger = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.tick().await; // skip the immediate first tick
+        loop {
+            interval.tick().await;
+            let mut sink = ws_tx_ping.lock().await;
+            if sink.send(Message::Ping(vec![].into())).await.is_err() {
+                break;
+            }
+        }
+    });
+
     let mut client_id: Option<String> = None;
     let mut client_hostname: Option<String> = None;
 
@@ -116,6 +130,7 @@ pub async fn handle_client_ws(
     }
 
     writer.abort();
+    pinger.abort();
 }
 
 async fn handle_c2s(
