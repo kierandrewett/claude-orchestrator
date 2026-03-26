@@ -71,6 +71,19 @@ impl McpServerRegistry {
         }
     }
 
+    /// Reload the registry from disk, picking up any external changes
+    /// (e.g. from the dashboard UI writing directly to mcp_servers.json).
+    /// Called before every session start so MCP config is always current.
+    pub fn reload_from_disk(&self) {
+        match std::fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<RegistryData>(&s).ok())
+        {
+            Some(data) => *self.data.lock().unwrap() = data,
+            None => {} // file missing or malformed — keep current in-memory state
+        }
+    }
+
     /// Returns a snapshot of all custom entries (including disabled ones).
     pub fn custom_servers(&self) -> Vec<McpServerEntry> {
         self.data.lock().unwrap().custom.clone()

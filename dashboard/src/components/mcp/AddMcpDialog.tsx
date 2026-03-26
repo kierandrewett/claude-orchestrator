@@ -56,10 +56,6 @@ export function AddMcpDialog({ open, onOpenChange }: AddMcpDialogProps) {
         }
     };
 
-    const addEnvPair = () => {
-        setEnvPairs(prev => [...prev, { key: '', value: '' }]);
-    };
-
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
         const env: Record<string, string> = {};
@@ -75,12 +71,12 @@ export function AddMcpDialog({ open, onOpenChange }: AddMcpDialogProps) {
     };
 
     return (
-        <Dialog open={open} onOpenChange={(v) => { onOpenChange(v); if (!v) reset(); }}>
+        <Dialog open={open} onOpenChange={v => { onOpenChange(v); if (!v) reset(); }}>
             <DialogContent className="max-w-md">
                 <DialogHeader>
                     <DialogTitle>Add MCP Server</DialogTitle>
                     <DialogDescription>
-                        Configure a new MCP server for Claude to use.
+                        Configure a new MCP server for Claude to use as tools.
                     </DialogDescription>
                 </DialogHeader>
 
@@ -90,7 +86,7 @@ export function AddMcpDialog({ open, onOpenChange }: AddMcpDialogProps) {
                         <Input
                             value={name}
                             onChange={e => setName(e.target.value)}
-                            placeholder="my-server"
+                            placeholder="e.g. filesystem"
                             required
                         />
                     </div>
@@ -103,7 +99,7 @@ export function AddMcpDialog({ open, onOpenChange }: AddMcpDialogProps) {
                             onValueChange={v => v && setTransport(v as TransportType)}
                         >
                             <SegmentedControlItem value="command">Command</SegmentedControlItem>
-                            <SegmentedControlItem value="url">URL</SegmentedControlItem>
+                            <SegmentedControlItem value="url">URL (HTTP/SSE)</SegmentedControlItem>
                         </SegmentedControl>
                     </div>
 
@@ -116,27 +112,38 @@ export function AddMcpDialog({ open, onOpenChange }: AddMcpDialogProps) {
                                     onChange={e => setCommand(e.target.value)}
                                     placeholder="npx @modelcontextprotocol/server-filesystem"
                                     required
+                                    className="font-mono text-xs"
                                 />
                             </div>
 
                             <div className="space-y-1.5">
-                                <Label>Arguments</Label>
-                                <div className="flex flex-wrap gap-1 mb-1">
-                                    {args.map((arg, i) => (
-                                        <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-xs text-zinc-300">
-                                            {arg}
-                                            <button type="button" onClick={() => setArgs(prev => prev.filter((_, j) => j !== i))}>
-                                                <X size={10} />
-                                            </button>
-                                        </span>
-                                    ))}
-                                </div>
+                                <Label>Arguments <span className="text-zinc-600 font-normal">(optional)</span></Label>
+                                {args.length > 0 && (
+                                    <div className="flex flex-wrap gap-1 mb-1.5">
+                                        {args.map((arg, i) => (
+                                            <span
+                                                key={i}
+                                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-zinc-800 border border-zinc-700/60 text-xs text-zinc-300 font-mono"
+                                            >
+                                                {arg}
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setArgs(prev => prev.filter((_, j) => j !== i))}
+                                                    className="text-zinc-600 hover:text-zinc-300 transition-colors"
+                                                >
+                                                    <X size={10} />
+                                                </button>
+                                            </span>
+                                        ))}
+                                    </div>
+                                )}
                                 <div className="flex gap-2">
                                     <Input
                                         value={argsInput}
                                         onChange={e => setArgsInput(e.target.value)}
                                         onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), addArg())}
-                                        placeholder="/path/to/dir"
+                                        placeholder="/path/to/directory"
+                                        className="font-mono text-xs"
                                     />
                                     <Button type="button" variant="outline" size="icon" onClick={addArg}>
                                         <Plus size={14} />
@@ -146,9 +153,13 @@ export function AddMcpDialog({ open, onOpenChange }: AddMcpDialogProps) {
 
                             <div className="space-y-1.5">
                                 <div className="flex items-center justify-between">
-                                    <Label>Environment Variables</Label>
-                                    <button type="button" onClick={addEnvPair} className="text-xs text-zinc-500 hover:text-zinc-300">
-                                        + Add
+                                    <Label>Environment variables <span className="text-zinc-600 font-normal">(optional)</span></Label>
+                                    <button
+                                        type="button"
+                                        onClick={() => setEnvPairs(prev => [...prev, { key: '', value: '' }])}
+                                        className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors flex items-center gap-1"
+                                    >
+                                        <Plus size={10} /> Add
                                     </button>
                                 </div>
                                 {envPairs.map((pair, i) => (
@@ -157,14 +168,19 @@ export function AddMcpDialog({ open, onOpenChange }: AddMcpDialogProps) {
                                             value={pair.key}
                                             onChange={e => setEnvPairs(prev => prev.map((p, j) => j === i ? { ...p, key: e.target.value } : p))}
                                             placeholder="KEY"
-                                            className="font-mono"
+                                            className="font-mono text-xs w-32 shrink-0"
                                         />
                                         <Input
                                             value={pair.value}
                                             onChange={e => setEnvPairs(prev => prev.map((p, j) => j === i ? { ...p, value: e.target.value } : p))}
                                             placeholder="value"
+                                            className="text-xs"
                                         />
-                                        <button type="button" onClick={() => setEnvPairs(prev => prev.filter((_, j) => j !== i))} className="text-zinc-600 hover:text-zinc-300">
+                                        <button
+                                            type="button"
+                                            onClick={() => setEnvPairs(prev => prev.filter((_, j) => j !== i))}
+                                            className="text-zinc-600 hover:text-zinc-300 transition-colors shrink-0"
+                                        >
                                             <X size={14} />
                                         </button>
                                     </div>
@@ -177,7 +193,7 @@ export function AddMcpDialog({ open, onOpenChange }: AddMcpDialogProps) {
                             <Input
                                 value={url}
                                 onChange={e => setUrl(e.target.value)}
-                                placeholder="https://mcp.example.com"
+                                placeholder="https://mcp.example.com/sse"
                                 type="url"
                                 required
                             />
@@ -188,7 +204,7 @@ export function AddMcpDialog({ open, onOpenChange }: AddMcpDialogProps) {
                 <DialogFooter>
                     <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
                     <Button onClick={handleSubmit} disabled={addMutation.isPending || !name}>
-                        {addMutation.isPending ? 'Adding...' : 'Add Server'}
+                        {addMutation.isPending ? 'Adding…' : 'Add Server'}
                     </Button>
                 </DialogFooter>
             </DialogContent>

@@ -3,6 +3,7 @@ mod client_ws;
 mod commands;
 mod config;
 mod idle_watchdog;
+mod internal_api;
 mod mcp;
 mod mcp_registry;
 mod orchestrator;
@@ -407,10 +408,16 @@ async fn run(config_path: PathBuf) -> Result<()> {
                     }
                 }
             };
+            let internal_api_state = internal_api::InternalApiState {
+                registry: Arc::clone(&task_reg),
+                backend_tx: b.backend_sender(),
+            };
+
             let app = Router::new()
             // /ws for the browser dashboard, /ws/client for the desktop client
             .route("/ws", get(ws_handler.clone()))
             .route("/ws/client", get(ws_handler))
+            .merge(internal_api::router(internal_api_state))
             .merge(
                 Router::new()
                     .route("/api/session/:session_id/action", axum::routing::post(session_action_handler))

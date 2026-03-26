@@ -20,12 +20,23 @@
 
 @theme {
   --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  --font-sans: 'Inter', 'SF Pro Display', system-ui, -apple-system, sans-serif;
+}
+
+/* Base */
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'rlig' 1, 'calt' 1;
 }
 
 /* Scrollbar styling */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 
 ::-webkit-scrollbar-track {
@@ -33,15 +44,15 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #3f3f46;
+  background: #27272a;
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #52525b;
+  background: #3f3f46;
 }
 
-/* Shiki output overrides */
+/* Shiki overrides */
 .shiki {
   background: transparent !important;
   margin: 0;
@@ -55,12 +66,61 @@
   min-width: 100%;
 }
 
-/* Pulse animation for running status dot */
+/* Running task pulsing dot */
 @keyframes pulse-dot {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
+  50%       { opacity: 0.35; }
 }
 
 .animate-pulse-dot {
-  animation: pulse-dot 2s ease-in-out infinite;
+  animation: pulse-dot 1.8s ease-in-out infinite;
+}
+
+/* Prose overrides for chat */
+.prose h1, .prose h2, .prose h3 {
+  color: #e4e4e7;
+  font-weight: 600;
+}
+
+.prose p {
+  color: #d4d4d8;
+  margin-top: 0.6em;
+  margin-bottom: 0.6em;
+}
+
+.prose code:not(pre code) {
+  background: #27272a;
+  border: 1px solid #3f3f46;
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+  font-size: 0.85em;
+  color: #a1a1aa;
+}
+
+.prose pre {
+  background: #18181b !important;
+  border: 1px solid #27272a;
+  border-radius: 8px;
+  padding: 0.875rem 1rem;
+}
+
+.prose a {
+  color: #6ee7b7;
+  text-decoration: none;
+}
+
+.prose a:hover {
+  text-decoration: underline;
+}
+
+.prose blockquote {
+  border-left: 3px solid #3f3f46;
+  color: #71717a;
+  padding-left: 1em;
+  margin-left: 0;
+}
+
+.prose ul li::marker,
+.prose ol li::marker {
+  color: #52525b;
 }

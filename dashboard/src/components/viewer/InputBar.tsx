@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Send, Square, Mic, MicOff } from 'lucide-react';
+import { Square, Mic, MicOff, ArrowUp } from 'lucide-react';
 import { useMutation } from '@tanstack/react-query';
 import { sendInput } from '../../api/client';
 import { cn } from '../../lib/utils';
@@ -57,7 +57,7 @@ export function InputBar({ taskId, onStop }: Props) {
         r.interimResults = false;
         r.onresult = (e) => {
             const transcript = e.results[0]?.[0]?.transcript ?? '';
-            setText((prev) => prev + (prev ? ' ' : '') + transcript);
+            setText(prev => prev + (prev ? ' ' : '') + transcript);
         };
         r.onend = () => setIsListening(false);
         r.start();
@@ -65,51 +65,74 @@ export function InputBar({ taskId, onStop }: Props) {
         setIsListening(true);
     };
 
+    // Auto-resize textarea
     useEffect(() => {
         const ta = textareaRef.current;
         if (!ta) return;
         ta.style.height = 'auto';
-        ta.style.height = Math.min(ta.scrollHeight, 180) + 'px';
+        ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
     }, [text]);
 
+    const canSend = text.trim().length > 0 && !sendMutation.isPending;
+
     return (
-        <div className="relative border-t border-zinc-800/80 bg-zinc-950 px-3 py-2.5">
-            <div className="flex items-end gap-2 bg-zinc-900 border border-zinc-700/50 rounded-2xl px-3 py-2.5 focus-within:border-zinc-600 transition-colors">
+        <div className="border-t border-zinc-800/60 bg-zinc-950 px-3 pb-3 pt-2.5 shrink-0">
+            <div className={cn(
+                'flex items-end gap-2 bg-zinc-900 border rounded-2xl px-3.5 py-2.5 transition-all',
+                'border-zinc-800/80 focus-within:border-zinc-700',
+            )}>
                 <textarea
                     ref={textareaRef}
                     value={text}
-                    onChange={(e) => setText(e.target.value)}
+                    onChange={e => setText(e.target.value)}
                     onKeyDown={handleKeyDown}
                     placeholder="Message Claude…"
                     rows={1}
                     className="flex-1 bg-transparent text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none resize-none font-sans leading-relaxed"
-                    style={{ minHeight: '24px', maxHeight: '180px', fontSize: '16px' }}
+                    style={{ minHeight: '22px', maxHeight: '200px', fontSize: '15px' }}
                 />
                 <div className="flex items-center gap-1 shrink-0 pb-0.5">
                     <button
                         onClick={toggleVoice}
-                        className={cn('p-1.5 rounded-lg transition-colors', isListening ? 'text-red-400 bg-red-500/10 animate-pulse' : 'text-zinc-600 hover:text-zinc-400')}
+                        className={cn(
+                            'p-1.5 rounded-lg transition-colors',
+                            isListening
+                                ? 'text-red-400 bg-red-500/10 animate-pulse'
+                                : 'text-zinc-600 hover:text-zinc-400 hover:bg-zinc-800/60',
+                        )}
                         title="Voice input"
                     >
-                        {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                        {isListening ? <MicOff size={14} /> : <Mic size={14} />}
                     </button>
                     <button
                         onClick={onStop}
-                        className="p-1.5 text-zinc-600 hover:text-red-400 rounded-lg transition-colors"
+                        className="p-1.5 text-zinc-600 hover:text-red-400 hover:bg-zinc-800/60 rounded-lg transition-colors"
                         title="Stop task"
                     >
-                        <Square className="w-4 h-4" />
+                        <Square size={14} />
                     </button>
                     <button
                         onClick={send}
-                        disabled={!text.trim() || sendMutation.isPending}
-                        className="p-1.5 bg-zinc-700 hover:bg-zinc-600 disabled:bg-transparent disabled:text-zinc-700 text-zinc-200 rounded-lg transition-colors"
+                        disabled={!canSend}
+                        className={cn(
+                            'p-1.5 rounded-lg transition-all',
+                            canSend
+                                ? 'bg-zinc-100 hover:bg-white text-zinc-900'
+                                : 'bg-zinc-800 text-zinc-700 cursor-not-allowed',
+                        )}
                         title="Send (Enter)"
                     >
-                        <Send className="w-4 h-4" />
+                        {sendMutation.isPending ? (
+                            <div className="w-3.5 h-3.5 rounded-full border-2 border-zinc-600 border-t-transparent animate-spin" />
+                        ) : (
+                            <ArrowUp size={14} />
+                        )}
                     </button>
                 </div>
             </div>
+            <p className="text-[10px] text-zinc-700 text-center mt-1.5">
+                Enter to send · Shift+Enter for new line
+            </p>
         </div>
     );
 }

@@ -41,6 +41,12 @@ export const tasksRouter = router({
             return callApi('POST', `/api/tasks/${input.id}/message`, { text: input.text });
         }),
 
+    wake: publicProcedure
+        .input(z.string())
+        .mutation(async ({ input: id }) => {
+            return callApi('POST', `/api/tasks/${id}/wake`);
+        }),
+
     history: publicProcedure
         .input(z.string())
         .query(async ({ input: id }) => {

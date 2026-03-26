@@ -19,39 +19,39 @@ export function LoginPage() {
                 headers: { Authorization: `Bearer ${token}` },
             });
             if (res.status === 401) {
-                setError('Invalid token. Please try again.');
+                setError('Invalid token — please try again.');
                 return;
             }
             localStorage.setItem('dashboard_token', token);
             void navigate({ to: '/' });
         } catch {
-            setError('Connection failed. Is the server running?');
+            setError('Connection failed — is the server running?');
         } finally {
             setLoading(false);
         }
     };
 
     return (
-        <div className="flex-1 flex items-center justify-center p-4">
-            <div className="w-full max-w-sm">
+        <div className="flex-1 flex items-center justify-center p-4 bg-zinc-950">
+            <div className="w-full max-w-xs">
+                {/* Logo */}
                 <div className="flex flex-col items-center mb-8">
-                    <div className="w-14 h-14 rounded-2xl bg-zinc-800 border border-zinc-700 flex items-center justify-center mb-4">
-                        <Bot size={28} className="text-zinc-300" />
+                    <div className="w-12 h-12 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center mb-4 shadow-lg">
+                        <Bot size={22} className="text-zinc-300" />
                     </div>
-                    <h1 className="text-xl font-bold text-zinc-100">Dashboard Access</h1>
-                    <p className="text-sm text-zinc-500 mt-1 text-center">
-                        Enter your dashboard token to continue
-                    </p>
+                    <h1 className="text-lg font-semibold text-zinc-100">Claude Orchestrator</h1>
+                    <p className="text-sm text-zinc-600 mt-1">Enter your token to continue</p>
                 </div>
 
-                <form onSubmit={handleSubmit} className="space-y-4">
+                {/* Form */}
+                <form onSubmit={handleSubmit} className="space-y-3">
                     <div>
                         <Input
                             type="password"
                             placeholder="Dashboard token"
                             value={token}
                             onChange={e => setToken(e.target.value)}
-                            icon={<KeyRound size={14} />}
+                            icon={<KeyRound size={13} />}
                             autoFocus
                             error={Boolean(error)}
                         />
@@ -60,12 +60,8 @@ export function LoginPage() {
                         )}
                     </div>
 
-                    <Button
-                        type="submit"
-                        className="w-full"
-                        disabled={!token || loading}
-                    >
-                        {loading ? 'Connecting...' : 'Connect'}
+                    <Button type="submit" className="w-full" disabled={!token || loading}>
+                        {loading ? 'Connecting…' : 'Connect'}
                     </Button>
                 </form>
             </div>

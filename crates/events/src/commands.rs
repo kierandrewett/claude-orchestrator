@@ -53,6 +53,11 @@ pub enum ParsedCommand {
     EventsDisable { id: String },
     /// `/events delete <id>` — permanently delete an event.
     EventsDelete { id: String },
+
+    /// Wake a hibernated task without sending an initial message.
+    /// Used when MCP config changes and we want existing tasks to restart
+    /// with fresh config on their next run.
+    Wake,
 }
 
 /// Parse a text string beginning with `/` into a `ParsedCommand`.

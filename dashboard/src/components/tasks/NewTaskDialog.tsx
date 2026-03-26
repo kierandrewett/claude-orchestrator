@@ -52,7 +52,7 @@ export function NewTaskDialog({ open, onOpenChange }: NewTaskDialogProps) {
                 <DialogHeader>
                     <DialogTitle>New Task</DialogTitle>
                     <DialogDescription>
-                        Create a new Claude Code session.
+                        Start a new Claude Code session.
                     </DialogDescription>
                 </DialogHeader>
 
@@ -75,14 +75,21 @@ export function NewTaskDialog({ open, onOpenChange }: NewTaskDialogProps) {
                     </div>
 
                     <div className="space-y-1.5">
-                        <Label htmlFor="prompt">Initial Prompt (optional)</Label>
+                        <Label htmlFor="prompt">Initial prompt <span className="text-zinc-600 font-normal">(optional)</span></Label>
                         <textarea
                             id="prompt"
-                            className="w-full h-24 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-zinc-500 resize-none"
+                            className="w-full h-28 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-zinc-700 focus:border-zinc-700 resize-none transition-colors"
                             placeholder="What would you like Claude to do?"
                             value={prompt}
                             onChange={e => setPrompt(e.target.value)}
+                            onKeyDown={e => {
+                                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                                    e.preventDefault();
+                                    handleSubmit(e as unknown as React.FormEvent);
+                                }
+                            }}
                         />
+                        <p className="text-[10px] text-zinc-700">⌘Enter to submit</p>
                     </div>
                 </form>
 
@@ -90,11 +97,8 @@ export function NewTaskDialog({ open, onOpenChange }: NewTaskDialogProps) {
                     <Button variant="ghost" onClick={() => onOpenChange(false)}>
                         Cancel
                     </Button>
-                    <Button
-                        onClick={handleSubmit}
-                        disabled={createMutation.isPending}
-                    >
-                        {createMutation.isPending ? 'Creating...' : 'Create Task'}
+                    <Button onClick={handleSubmit} disabled={createMutation.isPending}>
+                        {createMutation.isPending ? 'Creating…' : 'Create Task'}
                     </Button>
                 </DialogFooter>
             </DialogContent>

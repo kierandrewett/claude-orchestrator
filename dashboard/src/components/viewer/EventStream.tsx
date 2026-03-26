@@ -1,4 +1,5 @@
 import { useEffect, useRef, useMemo, useState } from 'react';
+import { ChevronDown } from 'lucide-react';
 import type { OrchestratorEvent } from '../../types';
 import { EventRow } from './EventRow';
 
@@ -76,7 +77,10 @@ function accumulateEvents(events: OrchestratorEvent[]): ConversationTurn[] {
                     .find(b => b.type === 'tool_use' && (b as ToolUseBlock).name === tool_name && !(b as ToolUseBlock).done);
                 if (block?.type === 'tool_use') block.done = true;
             }
-            turns.push({ role: 'user', blocks: [{ type: 'tool_result', tool_use_id: tool_name, content: output_preview ?? summary, is_error }] });
+            turns.push({
+                role: 'user',
+                blocks: [{ type: 'tool_result', tool_use_id: tool_name, content: output_preview ?? summary, is_error }],
+            });
             continue;
         }
         if ('TurnComplete' in event) {
@@ -117,7 +121,7 @@ export function EventStream({ events }: EventStreamProps) {
 
     const turns = useMemo(() => accumulateEvents(events), [events]);
 
-    // Auto-scroll to bottom when new events arrive, unless user scrolled up
+    // Auto-scroll when new events arrive
     useEffect(() => {
         const newEvents = events.length > prevEventsLen.current;
         prevEventsLen.current = events.length;
@@ -127,12 +131,10 @@ export function EventStream({ events }: EventStreamProps) {
         }
     }, [events.length, userScrolled]);
 
-    // Reset auto-scroll when events are replaced (history load)
+    // Reset auto-scroll on initial load
     useEffect(() => {
         setUserScrolled(false);
-        if (sentinelRef.current) {
-            sentinelRef.current.scrollIntoView({ block: 'end' });
-        }
+        sentinelRef.current?.scrollIntoView({ block: 'end' });
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
@@ -145,8 +147,11 @@ export function EventStream({ events }: EventStreamProps) {
 
     if (events.length === 0) {
         return (
-            <div className="flex-1 flex items-center justify-center text-zinc-600 text-sm">
-                No events yet — waiting for Claude...
+            <div className="flex-1 flex flex-col items-center justify-center gap-2 text-zinc-700">
+                <div className="w-8 h-8 rounded-full border border-zinc-800 flex items-center justify-center animate-pulse">
+                    <div className="w-2 h-2 rounded-full bg-zinc-700" />
+                </div>
+                <p className="text-sm text-zinc-600">Waiting for Claude…</p>
             </div>
         );
     }
@@ -155,25 +160,26 @@ export function EventStream({ events }: EventStreamProps) {
         <div
             ref={containerRef}
             onScroll={handleScroll}
-            className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-4"
+            className="flex-1 overflow-y-auto flex flex-col"
         >
-            {turns.map((turn, i) => (
-                <EventRow key={i} turn={turn} />
-            ))}
+            <div className="px-4 md:px-6 py-4 flex flex-col gap-1 max-w-3xl w-full mx-auto">
+                {turns.map((turn, i) => (
+                    <EventRow key={i} turn={turn} />
+                ))}
+                <div ref={sentinelRef} className="h-2 shrink-0" />
+            </div>
 
-            {/* Sentinel for auto-scroll */}
-            <div ref={sentinelRef} className="h-px shrink-0" />
-
-            {/* Scroll-to-bottom button */}
+            {/* Scroll-to-bottom FAB */}
             {userScrolled && (
                 <button
                     onClick={() => {
                         setUserScrolled(false);
                         sentinelRef.current?.scrollIntoView({ behavior: 'smooth' });
                     }}
-                    className="sticky bottom-4 self-center px-3 py-1.5 text-xs rounded-full bg-zinc-800 border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700 transition-colors shadow-lg"
+                    className="sticky bottom-4 self-center flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full bg-zinc-800 border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700 transition-colors shadow-lg"
                 >
-                    Scroll to bottom ↓
+                    <ChevronDown size={13} />
+                    Scroll to bottom
                 </button>
             )}
         </div>

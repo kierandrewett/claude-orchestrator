@@ -156,6 +156,8 @@ function connect(): void {
         wsConnected = true;
         backoff = 1000;
         orchestratorEvents.emit('connected', true);
+        // Seed task store from the REST API now that the orchestrator is reachable.
+        void seedTasksFromApi();
     });
 
     ws.on('close', () => {
@@ -193,6 +195,29 @@ function scheduleReconnect(): void {
 
 // Start WS connection
 connect();
+
+// Seed initial task state from the orchestrator REST API so tasks created
+// before this server started (or before the WS connected) are visible immediately.
+async function seedTasksFromApi(): Promise<void> {
+    try {
+        const data = await callApi('GET', '/api/tasks') as unknown;
+        const tasks: TaskInfo[] = Array.isArray(data)
+            ? (data as TaskInfo[])
+            : ((data as { tasks?: TaskInfo[] }).tasks ?? []);
+        const now = new Date().toISOString();
+        let seeded = 0;
+        for (const task of tasks) {
+            if (!taskStore.has(task.id)) {
+                taskStore.set(task.id, { ...task, last_activity: task.last_activity || now });
+                seeded++;
+            }
+        }
+        if (seeded > 0) console.log(`[orchestrator] Seeded ${seeded} tasks from API`);
+    } catch {
+        // Orchestrator API not yet available — tasks will arrive via WS events
+    }
+}
+void seedTasksFromApi();
 
 // ── Exports ───────────────────────────────────────────────────────────────────
 

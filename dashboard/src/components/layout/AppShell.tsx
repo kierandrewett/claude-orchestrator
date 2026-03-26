@@ -5,9 +5,11 @@ import { Sidebar } from './Sidebar';
 import { CommandPalette } from '../CommandPalette';
 import { useSSE } from '../../hooks/useSSE';
 import { ToastProvider, ToastViewport } from '../ui/toast';
+import { cn } from '../../lib/utils';
 
 export function AppShell() {
     const [cmdOpen, setCmdOpen] = React.useState(false);
+    const [mobileSidebarOpen, setMobileSidebarOpen] = React.useState(false);
     const navigate = useNavigate();
     const routerState = useRouterState();
 
@@ -25,7 +27,7 @@ export function AppShell() {
         return () => window.removeEventListener('keydown', listener);
     }, []);
 
-    // Auth check - if server requires auth and we don't have a token, redirect to login
+    // Auth check
     React.useEffect(() => {
         const isLoginPage = routerState.location.pathname === '/login';
         if (isLoginPage) return;
@@ -40,8 +42,13 @@ export function AppShell() {
                     }
                 }
             })
-            .catch(() => {/* server may not be available yet */});
+            .catch(() => {});
     }, [navigate, routerState.location.pathname]);
+
+    // Close mobile sidebar on navigation
+    React.useEffect(() => {
+        setMobileSidebarOpen(false);
+    }, [routerState.location.pathname]);
 
     return (
         <ToastProvider>
@@ -49,11 +56,37 @@ export function AppShell() {
                 className="flex flex-col bg-zinc-950 text-zinc-100 overflow-hidden"
                 style={{ height: '100dvh' }}
             >
-                <Header onCommandPalette={() => setCmdOpen(true)} />
+                <Header
+                    onCommandPalette={() => setCmdOpen(true)}
+                    onMobileMenu={() => setMobileSidebarOpen(v => !v)}
+                />
                 <div className="flex flex-1 overflow-hidden min-h-0">
-                    {/* Sidebar — desktop only */}
-                    <aside className="hidden lg:flex w-64 flex-col shrink-0 border-r border-zinc-800">
+                    {/* Desktop sidebar */}
+                    <aside className="hidden lg:flex w-56 xl:w-60 flex-col shrink-0 border-r border-zinc-800/60">
                         <Sidebar />
+                    </aside>
+
+                    {/* Mobile sidebar backdrop */}
+                    <div
+                        className={cn(
+                            'fixed inset-0 z-40 lg:hidden transition-opacity duration-200',
+                            mobileSidebarOpen
+                                ? 'opacity-100 pointer-events-auto'
+                                : 'opacity-0 pointer-events-none',
+                        )}
+                        onClick={() => setMobileSidebarOpen(false)}
+                    >
+                        <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
+                    </div>
+
+                    {/* Mobile sidebar drawer */}
+                    <aside
+                        className={cn(
+                            'fixed inset-y-0 left-0 z-50 w-64 flex flex-col border-r border-zinc-800/60 shadow-2xl transition-transform duration-200 ease-out lg:hidden',
+                            mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full',
+                        )}
+                    >
+                        <Sidebar onNavigate={() => setMobileSidebarOpen(false)} />
                     </aside>
 
                     <main className="flex-1 overflow-auto flex flex-col min-h-0">

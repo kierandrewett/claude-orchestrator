@@ -85,7 +85,9 @@ impl Orchestrator {
     }
 
     /// Build the list of custom MCP servers and disabled server names to pass to StartSession.
+    /// Reloads mcp_servers.json from disk first so dashboard UI changes are always picked up.
     fn mcp_session_args(&self) -> (Vec<claude_shared::McpServerDef>, Vec<String>) {
+        self.mcp_registry.reload_from_disk();
         let custom = self.mcp_registry.custom_servers();
         let disabled = self.mcp_registry.disabled_names();
         let servers = custom
@@ -314,92 +316,118 @@ impl Orchestrator {
                 }
             }
             None | Some(TaskStateSummary::Hibernated) => {
-                // Task doesn't exist or was hibernated — (re)start session.
-                // We use the existing task_id rather than generating a new one so
-                // backends (e.g. Telegram) that address by fixed IDs keep working.
-                let session_id = Uuid::new_v4().to_string();
-                // Resume the previous conversation if we have the session ID, otherwise start fresh.
-                let (claude_session_id, is_resume) = self.registry
-                    .with(task_id, |t| t.claude_session_id.clone())
-                    .flatten()
-                    .map(|id| (id, true))
-                    .unwrap_or_else(|| (Uuid::new_v4().to_string(), false));
-                let (name, profile) = self.registry
-                    .with(task_id, |t| (t.name.clone(), t.profile.clone()))
-                    .unwrap_or_else(|| (task_id.0.clone(), self.config.docker.default_profile.clone()));
-
-                let mut task = Task::new(
-                    task_id.clone(),
-                    name.clone(),
-                    profile,
-                    TaskState::Running { session_id: session_id.clone() },
-                    TaskKind::Scratchpad,
-                );
-                task.current_trigger = msg_ref.clone();
-                task.claude_idle = false;
-                task.claude_session_id = Some(claude_session_id.clone());
-                self.registry.insert(task);
-
-                // Upsert task to DB with running status
-                self.db.upsert_task(&TaskRow {
-                    task_id: task_id.0.clone(),
-                    task_name: name.clone(),
-                    session_id: Some(claude_session_id.clone()),
-                    session_status: "running".to_string(),
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    last_activity: None,
-                });
-                self.bus.emit(OrchestratorEvent::TaskStateChanged {
-                    task_id: task_id.clone(),
-                    old_state: TaskStateSummary::Hibernated,
-                    new_state: TaskStateSummary::Running,
-                });
-                self.bus.emit(OrchestratorEvent::PhaseChanged {
-                    task_id: task_id.clone(),
-                    phase: SessionPhase::Starting,
-                    trigger_message: msg_ref.clone(),
-                });
-
-                let scratchpad = Self::is_scratchpad(task_id);
-                let (mcp_servers, disabled_mcp_servers) = self.mcp_session_args();
-                let suppress_mcp_tools = if scratchpad {
-                    vec!["rename_conversation".to_string()]
-                } else {
-                    vec![]
-                };
-                let allowed_emojis = self.session_allowed_emojis();
-                self.registry.with_mut(task_id, |t| {
-                    t.config.suppress_mcp_tools = suppress_mcp_tools.clone();
-                    t.config.allowed_emojis = allowed_emojis.clone();
-                });
-                info!("orchestrator: starting session for {task_id} (resume={is_resume})");
-                let delivered = self.clients.send_to_any_client(S2C::StartSession {
-                    session_id,
-                    initial_prompt: Some(text),
-                    initial_files: files,
-                    extra_args: vec![],
-                    claude_session_id,
-                    is_resume,
-                    system_prompt: self.session_system_prompt(scratchpad),
-                    mcp_servers,
-                    disabled_mcp_servers,
-                    suppress_mcp_tools,
-                    mcp_extra_env: self.backend_mcp_extra_env(),
-                });
-
-                if !delivered {
-                    error!("orchestrator: no client connected for auto-created task {task_id}");
-                    self.registry.with_mut(task_id, |t| t.state = TaskState::Dead);
-                    self.bus.emit(OrchestratorEvent::Error {
-                        task_id: Some(task_id.clone()),
-                        error: "No client daemon connected.".to_string(),
-                        next_steps: vec!["Start the claude-client daemon.".to_string()],
-                        trigger_ref: msg_ref,
-                    });
-                }
+                self.start_session_internal(task_id, Some(text), files, msg_ref).await;
             }
             Some(TaskStateSummary::Dead) => {
                 warn!("orchestrator: task {task_id} is Dead, dropping message");
+            }
+        }
+    }
+
+    /// Shared startup path: (re)start a Claude session for a hibernated or new task.
+    /// `initial_prompt = None` means wake without sending an opening message (used by wake_task).
+    /// `initial_prompt = Some(text)` delivers `text` as the first user turn.
+    async fn start_session_internal(
+        &self,
+        task_id: &TaskId,
+        initial_prompt: Option<String>,
+        initial_files: Vec<claude_shared::AttachedFile>,
+        msg_ref: Option<MessageRef>,
+    ) {
+        let session_id = Uuid::new_v4().to_string();
+        let (claude_session_id, is_resume) = self.registry
+            .with(task_id, |t| t.claude_session_id.clone())
+            .flatten()
+            .map(|id| (id, true))
+            .unwrap_or_else(|| (Uuid::new_v4().to_string(), false));
+        let (name, profile) = self.registry
+            .with(task_id, |t| (t.name.clone(), t.profile.clone()))
+            .unwrap_or_else(|| (task_id.0.clone(), self.config.docker.default_profile.clone()));
+
+        let mut task = Task::new(
+            task_id.clone(),
+            name.clone(),
+            profile,
+            TaskState::Running { session_id: session_id.clone() },
+            TaskKind::Scratchpad,
+        );
+        task.current_trigger = msg_ref.clone();
+        task.claude_idle = false;
+        task.claude_session_id = Some(claude_session_id.clone());
+        self.registry.insert(task);
+
+        self.db.upsert_task(&TaskRow {
+            task_id: task_id.0.clone(),
+            task_name: name.clone(),
+            session_id: Some(claude_session_id.clone()),
+            session_status: "running".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            last_activity: None,
+        });
+        self.bus.emit(OrchestratorEvent::TaskStateChanged {
+            task_id: task_id.clone(),
+            old_state: TaskStateSummary::Hibernated,
+            new_state: TaskStateSummary::Running,
+        });
+        self.bus.emit(OrchestratorEvent::PhaseChanged {
+            task_id: task_id.clone(),
+            phase: SessionPhase::Starting,
+            trigger_message: msg_ref.clone(),
+        });
+
+        let scratchpad = Self::is_scratchpad(task_id);
+        let (mcp_servers, disabled_mcp_servers) = self.mcp_session_args();
+        let suppress_mcp_tools = if scratchpad {
+            vec!["rename_conversation".to_string()]
+        } else {
+            vec![]
+        };
+        let allowed_emojis = self.session_allowed_emojis();
+        self.registry.with_mut(task_id, |t| {
+            t.config.suppress_mcp_tools = suppress_mcp_tools.clone();
+            t.config.allowed_emojis = allowed_emojis.clone();
+        });
+        let action = if initial_prompt.is_some() { "starting" } else { "waking" };
+        info!("orchestrator: {action} session for {task_id} (resume={is_resume})");
+        let delivered = self.clients.send_to_any_client(S2C::StartSession {
+            session_id,
+            initial_prompt,
+            initial_files,
+            extra_args: vec![],
+            claude_session_id,
+            is_resume,
+            system_prompt: self.session_system_prompt(scratchpad),
+            mcp_servers,
+            disabled_mcp_servers,
+            suppress_mcp_tools,
+            mcp_extra_env: self.backend_mcp_extra_env(),
+        });
+
+        if !delivered {
+            error!("orchestrator: no client connected for task {task_id}");
+            self.registry.with_mut(task_id, |t| t.state = TaskState::Dead);
+            self.bus.emit(OrchestratorEvent::Error {
+                task_id: Some(task_id.clone()),
+                error: "No client daemon connected.".to_string(),
+                next_steps: vec!["Start the claude-client daemon.".to_string()],
+                trigger_ref: msg_ref,
+            });
+        }
+    }
+
+    /// Wake a hibernated task without sending an initial user message.
+    /// The session starts (or resumes) with fresh MCP config but waits silently
+    /// for the next user input rather than generating an immediate response.
+    pub async fn wake_task(&self, task_id: &TaskId, msg_ref: Option<MessageRef>) {
+        match self.registry.with(task_id, |t| t.state.summary()) {
+            Some(TaskStateSummary::Hibernated) | None => {
+                self.start_session_internal(task_id, None, vec![], msg_ref).await;
+            }
+            Some(TaskStateSummary::Running) => {
+                info!("orchestrator: wake_task({task_id}) — already running, ignoring");
+            }
+            Some(TaskStateSummary::Dead) => {
+                warn!("orchestrator: wake_task({task_id}) — task is Dead, ignoring");
             }
         }
     }
@@ -563,6 +591,11 @@ impl Orchestrator {
                         let entries = build_events_list_entries(&self.db);
                         self.bus.emit(OrchestratorEvent::EventsList { entries, trigger_ref: None });
                     }
+                }
+            }
+            ParsedCommand::Wake => {
+                if let Some(id) = task_id {
+                    self.wake_task(&id, trigger_ref).await;
                 }
             }
         }

@@ -3,9 +3,11 @@ import {
     LayoutDashboard,
     Terminal,
     Plug,
-    Clock,
+    CalendarClock,
     Settings2,
     Bot,
+    Wifi,
+    WifiOff,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { trpc } from '../../api/trpc';
@@ -14,7 +16,7 @@ const navItems = [
     { to: '/', label: 'Overview', icon: LayoutDashboard, exact: true },
     { to: '/tasks', label: 'Tasks', icon: Terminal },
     { to: '/mcp', label: 'MCP Servers', icon: Plug },
-    { to: '/scheduler', label: 'Scheduled Events', icon: Clock },
+    { to: '/scheduler', label: 'Scheduled', icon: CalendarClock },
     { to: '/config', label: 'Configuration', icon: Settings2 },
 ];
 
@@ -30,24 +32,23 @@ export function Sidebar({ onNavigate }: SidebarProps) {
         refetchInterval: 5000,
     });
     const metrics = metricsQuery.data;
-
     const runningCount = metrics?.running_tasks ?? 0;
     const connected = metrics?.connected ?? false;
 
     return (
-        <div className="flex flex-col h-full overflow-hidden bg-zinc-900">
+        <div className="flex flex-col h-full overflow-hidden bg-zinc-950">
             {/* Logo */}
-            <div className="flex items-center gap-2.5 px-4 py-4 border-b border-zinc-800 shrink-0">
-                <div className="w-7 h-7 rounded-lg bg-zinc-700 flex items-center justify-center shrink-0">
-                    <Bot size={15} className="text-zinc-300" />
+            <div className="flex items-center gap-2.5 px-4 py-[14px] border-b border-zinc-800/60 shrink-0">
+                <div className="w-6 h-6 rounded-md bg-zinc-800 flex items-center justify-center shrink-0 border border-zinc-700/50">
+                    <Bot size={13} className="text-zinc-300" />
                 </div>
-                <div className="min-w-0">
-                    <p className="text-sm font-semibold text-zinc-100 truncate">Claude Orchestrator</p>
-                </div>
+                <p className="text-[13px] font-semibold text-zinc-100 truncate leading-tight">
+                    Claude Orchestrator
+                </p>
             </div>
 
             {/* Navigation */}
-            <nav className="flex-1 overflow-y-auto py-2">
+            <nav className="flex-1 overflow-y-auto py-2 px-2" aria-label="Main navigation">
                 {navItems.map(({ to, label, icon: Icon, exact }) => {
                     const isActive = exact
                         ? pathname === to
@@ -58,16 +59,22 @@ export function Sidebar({ onNavigate }: SidebarProps) {
                             to={to}
                             onClick={onNavigate}
                             className={cn(
-                                'flex items-center gap-2.5 mx-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors',
+                                'group flex items-center gap-2.5 px-2.5 py-[7px] rounded-md text-[13px] font-medium transition-colors mb-0.5',
                                 isActive
-                                    ? 'bg-zinc-800 text-zinc-100'
-                                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50',
+                                    ? 'bg-zinc-800/70 text-zinc-100'
+                                    : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900',
                             )}
                         >
-                            <Icon size={16} className="shrink-0" />
+                            <Icon
+                                size={14}
+                                className={cn(
+                                    'shrink-0 transition-colors',
+                                    isActive ? 'text-zinc-300' : 'text-zinc-600 group-hover:text-zinc-400',
+                                )}
+                            />
                             <span className="flex-1 truncate">{label}</span>
                             {label === 'Tasks' && runningCount > 0 && (
-                                <span className="text-[10px] font-medium bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-1.5 py-0.5 rounded-full">
+                                <span className="text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/20 px-1.5 py-px rounded-full tabular-nums leading-tight">
                                     {runningCount}
                                 </span>
                             )}
@@ -76,18 +83,23 @@ export function Sidebar({ onNavigate }: SidebarProps) {
                 })}
             </nav>
 
-            {/* Connection status */}
-            <div className="px-4 py-3 border-t border-zinc-800 shrink-0">
-                <div className="flex items-center gap-2">
-                    <span
-                        className={cn(
-                            'w-2 h-2 rounded-full shrink-0',
-                            connected ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-600',
-                        )}
-                    />
-                    <span className="text-xs text-zinc-500">
-                        {connected ? 'Connected' : 'Disconnected'}
-                    </span>
+            {/* Connection status footer */}
+            <div className="px-3 py-3 border-t border-zinc-800/60 shrink-0">
+                <div
+                    className={cn(
+                        'flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-medium',
+                        connected ? 'text-emerald-400' : 'text-zinc-600',
+                    )}
+                >
+                    {connected ? (
+                        <Wifi size={11} className="shrink-0" />
+                    ) : (
+                        <WifiOff size={11} className="shrink-0" />
+                    )}
+                    <span>{connected ? 'Connected to orchestrator' : 'Disconnected'}</span>
+                    {connected && (
+                        <span className="ml-auto w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                    )}
                 </div>
             </div>
         </div>
