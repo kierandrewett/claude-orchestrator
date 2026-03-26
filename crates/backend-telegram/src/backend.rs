@@ -451,11 +451,14 @@ async fn handle_orch_event(
                     let mut ts = TelegramState::load(state_dir);
                     ts.task_topics.insert(task_id.0.clone(), tid_i32);
                     ts.save(state_dir);
-                    // Echo the initial prompt so the topic doesn't look empty.
                     if let Some(prompt) = initial_prompt {
+                        // Echo the user's initial prompt into the topic.
                         if !prompt.is_empty() {
                             send_text_reply(bot, group_id, Some(thread_id), prompt, None, false).await;
                         }
+                    } else {
+                        // No prompt — invite the user to start.
+                        send_text_reply(bot, group_id, Some(thread_id), "<i>What would you like to talk about or work on?</i>", None, true).await;
                     }
                 }
                 Err(e) => {
