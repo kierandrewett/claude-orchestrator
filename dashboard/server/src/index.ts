@@ -112,7 +112,7 @@ async function main() {
 
     // ── Static file serving (production) ─────────────────────────────────────────
 
-    const distDir = path.join(getDirname(), '../../dist');
+    const distDir = path.join(getDirname(), '../dist');
     if (fs.existsSync(distDir)) {
         await server.register(staticFiles, {
             root: distDir,

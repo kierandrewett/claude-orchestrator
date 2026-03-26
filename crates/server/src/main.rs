@@ -329,8 +329,8 @@ async fn run(config_path: PathBuf) -> Result<()> {
     // Communicates via a Unix socket to avoid TCP port conflicts and IPv6 issues.
     let dashboard_socket: Option<Arc<str>> = if let Some(ref web_cfg) = config.backends.web {
         if web_cfg.enabled {
-            let api_bind = web_cfg.bind.clone().unwrap_or_else(|| "0.0.0.0:8080".to_string());
-            let orch_api = format!("http://{}", api_bind.replace("0.0.0.0", "127.0.0.1"));
+            let client_bind = config.server.client_bind.clone();
+            let orch_api = format!("http://{}", client_bind.replace("0.0.0.0", "127.0.0.1"));
             let orch_ws = orch_api.replacen("http://", "ws://", 1) + "/ws";
             let dashboard_token = web_cfg.dashboard_token.clone().unwrap_or_default();
             let config_path_str = config_path.to_string_lossy().to_string();
