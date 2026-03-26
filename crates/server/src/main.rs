@@ -5,6 +5,7 @@ mod config;
 mod idle_watchdog;
 mod internal_api;
 mod mcp;
+mod mcp_oauth;
 mod mcp_registry;
 mod orchestrator;
 mod persistence;
@@ -379,7 +380,9 @@ async fn run(config_path: PathBuf) -> Result<()> {
         let b = Arc::clone(&bus);
         let mcp_token = config.server.client_token.clone();
         let db_for_mcp = db.clone();
+        let mcp_registry_for_spawn = Arc::clone(&mcp_registry);
         tokio::spawn(async move {
+            let mcp_registry = mcp_registry_for_spawn;
             let session_api_state = SessionApiState {
                 registry: Arc::clone(&task_reg),
                 bus: Arc::clone(&b),
@@ -443,10 +446,13 @@ async fn run(config_path: PathBuf) -> Result<()> {
                 }
             };
 
+            let mcp_registry_for_api = Arc::clone(&mcp_registry);
             let internal_api_state = internal_api::InternalApiState {
                 registry: Arc::clone(&task_reg),
                 backend_tx: b.backend_sender(),
                 db: db_for_api,
+                mcp_registry: mcp_registry_for_api,
+                pending_oauth: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             };
 
             let app = Router::new()

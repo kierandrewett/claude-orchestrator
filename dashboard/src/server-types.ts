@@ -34,6 +34,8 @@ export interface McpServer extends McpServerEntry {
     enabled: boolean;
     /** null = no running session to check; true = tools loaded; false = failed to connect */
     connected?: boolean | null;
+    /** true = URL server with no valid OAuth token stored */
+    needs_oauth?: boolean;
 }
 
 export interface RawServerConfig {

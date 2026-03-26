@@ -93,14 +93,23 @@ impl Orchestrator {
         let servers = custom
             .into_iter()
             .filter(|s| !s.disabled)
-            .map(|s| claude_shared::McpServerDef {
-                name: s.name,
-                url: s.url,
-                transport: s.transport,
-                headers: s.headers,
-                command: s.command,
-                args: s.args,
-                env: s.env,
+            .map(|s| {
+                let mut headers = s.headers.clone();
+                // Inject OAuth Bearer token if we have a valid one and no explicit auth header.
+                if s.url.is_some() && !headers.contains_key("Authorization") {
+                    if let Some(token) = self.mcp_registry.valid_oauth_token(&s.name) {
+                        headers.insert("Authorization".to_string(), format!("Bearer {token}"));
+                    }
+                }
+                claude_shared::McpServerDef {
+                    name: s.name,
+                    url: s.url,
+                    transport: s.transport,
+                    headers,
+                    command: s.command,
+                    args: s.args,
+                    env: s.env,
+                }
             })
             .collect();
         (servers, disabled)
@@ -502,6 +511,11 @@ impl Orchestrator {
                     command: command.clone(),
                     args: args.clone(),
                     env: Default::default(),
+                    oauth_access_token: None,
+                    oauth_refresh_token: None,
+                    oauth_token_expires_at: None,
+                    oauth_token_endpoint: None,
+                    oauth_client_id: None,
                     disabled: false,
                 });
                 if let Err(e) = result {

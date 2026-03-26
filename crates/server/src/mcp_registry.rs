@@ -23,6 +23,21 @@ pub struct McpServerEntry {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// OAuth access token for URL-based servers that require browser auth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_access_token: Option<String>,
+    /// Refresh token for renewing the access token without re-authenticating.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_refresh_token: Option<String>,
+    /// Unix timestamp (seconds) when the access token expires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_token_expires_at: Option<u64>,
+    /// Token endpoint URL (needed for refresh).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_token_endpoint: Option<String>,
+    /// Client ID used during the OAuth registration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_client_id: Option<String>,
     #[serde(default)]
     pub disabled: bool,
 }
@@ -190,6 +205,57 @@ impl McpServerRegistry {
             });
         }
         entries
+    }
+
+    /// Store OAuth tokens for a server. Persists to disk.
+    pub fn set_oauth_token(
+        &self,
+        name: &str,
+        access_token: String,
+        refresh_token: Option<String>,
+        expires_at: Option<u64>,
+        token_endpoint: Option<String>,
+        client_id: Option<String>,
+    ) -> Result<(), String> {
+        let mut data = self.data.lock().unwrap();
+        let entry = data.custom.iter_mut().find(|s| s.name == name)
+            .ok_or_else(|| format!("MCP server '{}' not found", name))?;
+        entry.oauth_access_token = Some(access_token);
+        entry.oauth_refresh_token = refresh_token;
+        entry.oauth_token_expires_at = expires_at;
+        entry.oauth_token_endpoint = token_endpoint;
+        entry.oauth_client_id = client_id;
+        info!("mcp_registry: stored OAuth token for '{name}'");
+        Self::persist(&self.path, &data);
+        Ok(())
+    }
+
+    /// Clear OAuth tokens for a server (force re-authentication).
+    pub fn clear_oauth_token(&self, name: &str) {
+        let mut data = self.data.lock().unwrap();
+        if let Some(entry) = data.custom.iter_mut().find(|s| s.name == name) {
+            entry.oauth_access_token = None;
+            entry.oauth_refresh_token = None;
+            entry.oauth_token_expires_at = None;
+            Self::persist(&self.path, &data);
+        }
+    }
+
+    /// Returns the OAuth access token for a server if it exists and hasn't expired.
+    pub fn valid_oauth_token(&self, name: &str) -> Option<String> {
+        let data = self.data.lock().unwrap();
+        let entry = data.custom.iter().find(|s| s.name == name)?;
+        let token = entry.oauth_access_token.as_deref().filter(|t| !t.is_empty())?.to_string();
+        if let Some(expires_at) = entry.oauth_token_expires_at {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if now >= expires_at.saturating_sub(60) {
+                return None; // expired (or expiring within 60s)
+            }
+        }
+        Some(token)
     }
 
     /// Build a plain-text status display string (used by non-Telegram backends).

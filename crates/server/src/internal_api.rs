@@ -1,11 +1,12 @@
 /// Internal REST API served on the client-daemon port (client_bind).
 /// This is what the dashboard Node.js server calls via ORCHESTRATOR_API.
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
-    response::Json,
+    response::{Html, Json},
     routing::{delete, get, post, put},
     Router,
 };
@@ -16,6 +17,8 @@ use tokio::sync::mpsc;
 use claude_db::{Db, EventAction, ScheduleMode, ScheduledEvent};
 use claude_events::{BackendEvent, BackendSource, MessageRef, ParsedCommand, TaskId};
 
+use crate::mcp_oauth::{self, PendingOAuth};
+use crate::mcp_registry::McpServerRegistry;
 use crate::task_manager::{TaskRegistry, TaskState};
 
 #[derive(Clone)]
@@ -23,6 +26,9 @@ pub struct InternalApiState {
     pub registry: Arc<TaskRegistry>,
     pub backend_tx: mpsc::Sender<BackendEvent>,
     pub db: Db,
+    pub mcp_registry: Arc<McpServerRegistry>,
+    /// Pending OAuth flows keyed by the `state` parameter.
+    pub pending_oauth: Arc<Mutex<HashMap<String, PendingOAuth>>>,
 }
 
 pub fn router(state: InternalApiState) -> Router {
@@ -35,8 +41,10 @@ pub fn router(state: InternalApiState) -> Router {
         .route("/api/tasks/:id/message", post(send_message))
         .route("/api/tasks/:id/hibernate", post(hibernate_task))
         .route("/api/tasks/:id/wake", post(wake_task))
-        // MCP session status
+        // MCP session status + OAuth
         .route("/api/mcp/session-tools", get(mcp_session_tools))
+        .route("/api/mcp/oauth-start/:server_name", get(mcp_oauth_start))
+        .route("/api/mcp/oauth-callback", get(mcp_oauth_callback))
         // Scheduled events
         .route("/api/scheduled-events", get(list_events))
         .route("/api/scheduled-events", post(create_event))
@@ -253,6 +261,136 @@ async fn disable_event(
 ) -> Json<Value> {
     state.db.set_event_enabled(&id, false);
     Json(json!({ "ok": true }))
+}
+
+// ── MCP OAuth handlers ─────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct OAuthStartQuery {
+    redirect_uri: String,
+}
+
+/// Start an OAuth flow for a URL-based MCP server.
+/// Returns `{ auth_url }` — the caller opens this in the browser.
+async fn mcp_oauth_start(
+    Path(server_name): Path<String>,
+    Query(q): Query<OAuthStartQuery>,
+    State(state): State<InternalApiState>,
+) -> Result<Json<Value>, StatusCode> {
+    // Find the server URL.
+    let url = state
+        .mcp_registry
+        .custom_servers()
+        .into_iter()
+        .find(|s| s.name == server_name)
+        .and_then(|s| s.url)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Kick off discovery + registration.
+    let (auth_url, pending) = mcp_oauth::start_flow(&server_name, &url, &q.redirect_uri)
+        .await
+        .map_err(|e| {
+            tracing::error!("OAuth start failed for '{server_name}': {e}");
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    // Extract `state` param from the auth URL so we can key the pending entry.
+    let oauth_state = url::Url::parse(&auth_url)
+        .ok()
+        .and_then(|u| {
+            u.query_pairs()
+                .find(|(k, _)| k == "state")
+                .map(|(_, v)| v.into_owned())
+        })
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    state
+        .pending_oauth
+        .lock()
+        .unwrap()
+        .insert(oauth_state, pending);
+
+    Ok(Json(json!({ "auth_url": auth_url })))
+}
+
+#[derive(Deserialize)]
+struct OAuthCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+/// OAuth callback endpoint — the auth server redirects here after user authorises.
+async fn mcp_oauth_callback(
+    Query(q): Query<OAuthCallbackQuery>,
+    State(state): State<InternalApiState>,
+) -> Html<String> {
+    if let Some(err) = q.error {
+        let desc = q.error_description.unwrap_or_default();
+        return Html(oauth_page("Authorization failed", &format!("{err}: {desc}"), false));
+    }
+
+    let (code, oauth_state) = match (q.code, q.state) {
+        (Some(c), Some(s)) => (c, s),
+        _ => return Html(oauth_page("Authorization failed", "Missing code or state parameter.", false)),
+    };
+
+    let pending = match state.pending_oauth.lock().unwrap().remove(&oauth_state) {
+        Some(p) => p,
+        None => return Html(oauth_page(
+            "Authorization failed",
+            "Unknown or expired state. Please try authorizing again.",
+            false,
+        )),
+    };
+
+    let server_name = pending.server_name.clone();
+
+    match mcp_oauth::exchange_code(&pending, &code).await {
+        Ok(tokens) => {
+            let expires_at = tokens.expires_in.map(|secs| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    + secs
+            });
+            if let Err(e) = state.mcp_registry.set_oauth_token(
+                &server_name,
+                tokens.access_token,
+                tokens.refresh_token,
+                expires_at,
+                Some(pending.token_endpoint),
+                Some(pending.client_id),
+            ) {
+                tracing::error!("Failed to store OAuth token for '{server_name}': {e}");
+                return Html(oauth_page("Authorization failed", &e, false));
+            }
+            tracing::info!("OAuth token stored for MCP server '{server_name}'");
+            Html(oauth_page(&format!("\"{}\" authorized", server_name), "You can close this tab.", true))
+        }
+        Err(e) => {
+            tracing::error!("OAuth code exchange failed for '{server_name}': {e}");
+            Html(oauth_page("Authorization failed", &e.to_string(), false))
+        }
+    }
+}
+
+fn oauth_page(title: &str, message: &str, success: bool) -> String {
+    let color = if success { "#10b981" } else { "#ef4444" };
+    let icon = if success { "✓" } else { "✗" };
+    format!(
+        r#"<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title}</title>
+<style>body{{font-family:system-ui,sans-serif;background:#0a0a0a;color:#e4e4e7;
+display:flex;align-items:center;justify-content:center;height:100vh;margin:0}}
+.card{{background:#18181b;border:1px solid #27272a;border-radius:12px;padding:32px 40px;
+text-align:center;max-width:400px}}.icon{{font-size:48px;color:{color};margin-bottom:16px}}
+h1{{font-size:18px;font-weight:600;margin:0 0 8px;color:#f4f4f5}}
+p{{font-size:14px;color:#71717a;margin:0}}</style></head>
+<body><div class="card"><div class="icon">{icon}</div>
+<h1>{title}</h1><p>{message}</p></div></body></html>"#
+    )
 }
 
 // ── Serialisation helpers ──────────────────────────────────────────────────────

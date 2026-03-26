@@ -1,4 +1,4 @@
-import { Shield, Trash2, Copy, Check, Terminal, Globe, AlertCircle } from 'lucide-react';
+import { Shield, Trash2, Copy, Check, Terminal, Globe, AlertCircle, KeyRound } from 'lucide-react';
 import * as React from 'react';
 import { Switch } from '../ui/switch';
 import { trpc } from '../../api/trpc';
@@ -11,6 +11,7 @@ interface McpServerCardProps {
 
 export function McpServerCard({ server }: McpServerCardProps) {
     const [copied, setCopied] = React.useState(false);
+    const [authorizing, setAuthorizing] = React.useState(false);
     const utils = trpc.useUtils();
 
     const toggleMutation = trpc.mcp.toggle.useMutation({
@@ -18,6 +19,18 @@ export function McpServerCard({ server }: McpServerCardProps) {
     });
     const removeMutation = trpc.mcp.remove.useMutation({
         onSuccess: () => utils.mcp.list.invalidate(),
+    });
+    const startOAuthMutation = trpc.mcp.startOAuth.useMutation({
+        onSuccess: (data) => {
+            window.open(data.auth_url, '_blank', 'noopener,noreferrer');
+            // Poll for token after user returns
+            const poll = setInterval(() => {
+                void utils.mcp.list.invalidate();
+            }, 3000);
+            setTimeout(() => clearInterval(poll), 5 * 60 * 1000);
+            setAuthorizing(false);
+        },
+        onError: () => setAuthorizing(false),
     });
 
     const commandStr = server.command
@@ -67,7 +80,13 @@ export function McpServerCard({ server }: McpServerCardProps) {
                                 Connected
                             </span>
                         )}
-                        {server.connected === false && server.enabled && (
+                        {server.needs_oauth && (
+                            <span className="flex items-center gap-1 text-[9px] font-semibold px-1.5 py-0.5 rounded-full border border-amber-500/20 text-amber-400 bg-amber-500/10 uppercase tracking-wide">
+                                <KeyRound size={9} />
+                                Needs auth
+                            </span>
+                        )}
+                        {server.connected === false && server.enabled && !server.needs_oauth && (
                             <span className="flex items-center gap-1 text-[9px] font-semibold px-1.5 py-0.5 rounded-full border border-red-500/20 text-red-400 bg-red-500/10 uppercase tracking-wide">
                                 <AlertCircle size={9} />
                                 Not connected
@@ -92,6 +111,20 @@ export function McpServerCard({ server }: McpServerCardProps) {
 
                 {/* Controls */}
                 <div className="flex items-center gap-2 shrink-0">
+                    {server.needs_oauth && server.enabled && (
+                        <button
+                            onClick={() => {
+                                setAuthorizing(true);
+                                const redirectUri = `${window.location.origin}/api/mcp/oauth-callback`;
+                                startOAuthMutation.mutate({ name: server.name, redirect_uri: redirectUri });
+                            }}
+                            disabled={authorizing || startOAuthMutation.isPending}
+                            className="flex items-center gap-1 px-2 py-1 text-[10px] font-medium rounded-md border border-amber-500/30 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20 transition-colors disabled:opacity-50"
+                        >
+                            <KeyRound size={10} />
+                            Authorize
+                        </button>
+                    )}
                     <Switch
                         checked={server.enabled}
                         onCheckedChange={enabled => toggleMutation.mutate({ name: server.name, enabled })}

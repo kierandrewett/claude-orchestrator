@@ -80,4 +80,14 @@ export const mcpRouter = router({
             void wakeHibernatedTasks();
             return { ok: true };
         }),
+
+    startOAuth: publicProcedure
+        .input(z.object({ name: z.string(), redirect_uri: z.string() }))
+        .mutation(async ({ input }) => {
+            const result = await callApi(
+                'GET',
+                `/api/mcp/oauth-start/${encodeURIComponent(input.name)}?redirect_uri=${encodeURIComponent(input.redirect_uri)}`
+            ) as { auth_url: string };
+            return { auth_url: result.auth_url };
+        }),
 });

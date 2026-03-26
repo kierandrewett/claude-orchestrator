@@ -11,12 +11,16 @@ export interface McpServerEntry {
     url?: string | null;
     /** Transport type for URL-based servers: "http" (default) or "sse". */
     transport?: string;
+    /** OAuth fields — written by the Rust registry after a successful auth flow. */
+    oauth_access_token?: string;
+    oauth_token_expires_at?: number;
     disabled?: boolean;
 }
 
 export interface McpServer extends McpServerEntry {
     builtin: boolean;
     enabled: boolean;
+    needs_oauth?: boolean;
 }
 
 interface McpRegistryFile {
@@ -70,11 +74,19 @@ export async function listServers(stateDir: string): Promise<McpServer[]> {
         enabled: !disabled.has(s.name),
     }));
 
-    const custom: McpServer[] = (reg.custom ?? []).map(s => ({
-        ...s,
-        builtin: false,
-        enabled: !disabled.has(s.name),
-    }));
+    const nowSecs = Date.now() / 1000;
+    const custom: McpServer[] = (reg.custom ?? []).map(s => {
+        const hasValidToken = !!(
+            s.oauth_access_token &&
+            (!s.oauth_token_expires_at || nowSecs < s.oauth_token_expires_at - 60)
+        );
+        return {
+            ...s,
+            builtin: false,
+            enabled: !disabled.has(s.name),
+            needs_oauth: !!(s.url && !hasValidToken),
+        };
+    });
 
     return [...builtins, ...custom];
 }
