@@ -73,4 +73,7 @@ guild_id  = 123456789
 # Web dashboard
 [backends.web]
 enabled = false
-# bind = "0.0.0.0:3000"
+# bind              = "0.0.0.0:8080"            # Rust API bind address
+# dashboard_bind    = "0.0.0.0:3001"            # Node.js dashboard server address
+# dashboard_token   = "env:DASHBOARD_TOKEN"     # Bearer token (required to access dashboard)
+# dashboard_url     = "https://dashboard.example.com"  # External URL (shown in Telegram button)

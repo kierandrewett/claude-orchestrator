@@ -205,6 +205,9 @@ async fn run(config_path: PathBuf) -> Result<()> {
                 show_thinking: config.display.show_thinking,
                 state_dir: state_dir.clone(),
                 hidden_tools: tg_cfg.hidden_tools.clone(),
+                dashboard_url: config.backends.web
+                    .as_ref()
+                    .and_then(|w| w.dashboard_url.clone()),
             });
             let orch_rx = bus.subscribe_orchestrator();
             let tx = backend_sender.clone();
@@ -254,6 +257,43 @@ async fn run(config_path: PathBuf) -> Result<()> {
                     tracing::error!("web backend error: {e}");
                 }
             });
+        }
+    }
+
+    // Spawn Node.js dashboard server alongside the web API.
+    if let Some(ref web_cfg) = config.backends.web {
+        if web_cfg.enabled {
+            let api_bind = web_cfg.bind.clone().unwrap_or_else(|| "0.0.0.0:8080".to_string());
+            let orch_api = format!("http://{}", api_bind.replace("0.0.0.0", "localhost"));
+            let dashboard_port = web_cfg.dashboard_bind.as_deref()
+                .unwrap_or("0.0.0.0:3001")
+                .split(':').last().unwrap_or("3001").to_string();
+            let dashboard_token = web_cfg.dashboard_token.clone().unwrap_or_default();
+            let config_path_str = config_path.to_string_lossy().to_string();
+            let state_dir_str = state_dir.to_string_lossy().to_string();
+
+            let candidates: Vec<std::path::PathBuf> = vec![
+                std::path::PathBuf::from("dashboard/dist-server/index.cjs"),
+            ];
+
+            if let Some(server_js) = candidates.into_iter().find(|p| p.exists()) {
+                tokio::spawn(async move {
+                    let mut cmd = tokio::process::Command::new("node");
+                    cmd.arg(&server_js)
+                        .env("PORT", &dashboard_port)
+                        .env("ORCHESTRATOR_API", &orch_api)
+                        .env("DASHBOARD_TOKEN", &dashboard_token)
+                        .env("CONFIG_PATH", &config_path_str)
+                        .env("STATE_DIR", &state_dir_str);
+                    info!("starting dashboard server on :{dashboard_port}");
+                    match cmd.spawn() {
+                        Ok(mut child) => { let _ = child.wait().await; }
+                        Err(e) => tracing::error!("failed to start dashboard server: {e}"),
+                    }
+                });
+            } else {
+                info!("dashboard/dist-server/index.cjs not found - skipping dashboard spawn (run: cd dashboard && npm run build)");
+            }
         }
     }
 

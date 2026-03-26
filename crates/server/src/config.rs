@@ -112,6 +112,15 @@ pub struct DiscordConfig {
 pub struct WebConfig {
     pub enabled: bool,
     pub bind: Option<String>,
+    /// Port/address for the Node.js dashboard server (default: 0.0.0.0:3001).
+    #[serde(default)]
+    pub dashboard_bind: Option<String>,
+    /// Bearer token required to access the dashboard UI. None = no auth required.
+    #[serde(default)]
+    pub dashboard_token: Option<String>,
+    /// External URL of the dashboard (used in Telegram "Open Dashboard" button etc).
+    #[serde(default)]
+    pub dashboard_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

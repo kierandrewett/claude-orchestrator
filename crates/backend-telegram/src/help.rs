@@ -14,8 +14,8 @@ pub const CB_HELP_BACK:    &str = "help:back";
 
 // ── Keyboards ─────────────────────────────────────────────────────────────────
 
-pub fn main_keyboard() -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![
+pub fn main_keyboard(dashboard_url: Option<&str>) -> InlineKeyboardMarkup {
+    let mut rows = vec![
         vec![
             InlineKeyboardButton::callback("📋 Task Management", CB_HELP_TASKS),
             InlineKeyboardButton::callback("🔧 MCP Servers",     CB_HELP_MCP),
@@ -27,7 +27,13 @@ pub fn main_keyboard() -> InlineKeyboardMarkup {
         vec![
             InlineKeyboardButton::callback("🕐 Scheduled Events", CB_HELP_EVENTS),
         ],
-    ])
+    ];
+    if let Some(url) = dashboard_url {
+        if let Ok(parsed) = url.parse() {
+            rows.push(vec![InlineKeyboardButton::url("🌐 Open Dashboard", parsed)]);
+        }
+    }
+    InlineKeyboardMarkup::new(rows)
 }
 
 fn back_keyboard() -> InlineKeyboardMarkup {
@@ -118,11 +124,11 @@ fn topics_text() -> &'static str {
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 /// Send the initial /help message.
-pub async fn send_help(bot: &Bot, chat_id: ChatId, thread_id: Option<ThreadId>, reply_to: Option<i32>) {
+pub async fn send_help(bot: &Bot, chat_id: ChatId, thread_id: Option<ThreadId>, reply_to: Option<i32>, dashboard_url: Option<&str>) {
     let mut req = bot
         .send_message(chat_id, main_text())
         .parse_mode(ParseMode::Html)
-        .reply_markup(main_keyboard());
+        .reply_markup(main_keyboard(dashboard_url));
     if let Some(tid) = thread_id {
         req = req.message_thread_id(tid);
     }
@@ -136,7 +142,7 @@ pub async fn send_help(bot: &Bot, chat_id: ChatId, thread_id: Option<ThreadId>, 
 }
 
 /// Handle a callback query from one of the help keyboard buttons.
-pub async fn handle_callback(bot: Bot, query: CallbackQuery) {
+pub async fn handle_callback(bot: Bot, query: CallbackQuery, dashboard_url: Option<&str>) {
     let data = match query.data.as_deref() {
         Some(d) if d.starts_with("help:") => d,
         _ => return,
@@ -156,7 +162,7 @@ pub async fn handle_callback(bot: Bot, query: CallbackQuery) {
         CB_HELP_CONFIG => (config_text(), back_keyboard()),
         CB_HELP_TOPICS => (topics_text(), back_keyboard()),
         CB_HELP_EVENTS => (events_text(), back_keyboard()),
-        CB_HELP_BACK   => (main_text(),   main_keyboard()),
+        CB_HELP_BACK   => (main_text(),   main_keyboard(dashboard_url)),
         _              => return,
     };
 

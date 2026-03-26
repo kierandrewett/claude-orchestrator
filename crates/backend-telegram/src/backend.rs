@@ -33,6 +33,8 @@ pub struct TelegramConfig {
     pub state_dir: std::path::PathBuf,
     /// Tool names whose call/result events are not shown to the user.
     pub hidden_tools: Vec<String>,
+    /// External URL of the dashboard (shown as a button in Telegram help).
+    pub dashboard_url: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
@@ -90,8 +92,8 @@ struct TaskTopicState {
     last_bot_message_id: Option<i32>,
     /// Latest conversation title (set by ConversationRenamed). Used as link text in /status.
     display_title: String,
-    /// Message ID that already has the 👨‍💻 reaction set this turn — skip redundant API calls.
-    working_reaction_msg_id: Option<i32>,
+    /// Last reaction we set (msg_id, emoji) — skip API call if already set.
+    last_reaction: Option<(i32, String)>,
     /// Timestamp of the last tool-group edit, used to rate-limit edits to ~1 per 2 s.
     last_tool_edit_at: Option<std::time::Instant>,
 }
@@ -111,7 +113,7 @@ impl TaskTopicState {
             last_tool_start_offset: 0,
             last_bot_message_id: None,
             display_title: String::new(),
-            working_reaction_msg_id: None,
+            last_reaction: None,
             last_tool_edit_at: None,
         }
     }
@@ -142,6 +144,7 @@ impl MessagingBackend for TelegramBackend {
         let group_id = ChatId(self.config.supergroup_id);
         let state_dir = self.config.state_dir.clone();
         let hidden_tools = self.config.hidden_tools.clone();
+        let dashboard_url = std::sync::Arc::new(self.config.dashboard_url.clone());
 
         // Fetch available forum topic icon emojis, cache their sticker IDs, and
         // announce the allowed emoji list to the orchestrator so the MCP helper
@@ -296,6 +299,7 @@ impl MessagingBackend for TelegramBackend {
                 let message_handler = {
                     let bot_msg = bot_clone.clone();
                     let sender = sender.clone();
+                    let dashboard_url_msg = std::sync::Arc::clone(&dashboard_url);
                     let allowed = allowed.clone();
                     let t2t = Arc::clone(&t2t);
                     let ts = Arc::clone(&task_states_clone);
@@ -309,8 +313,9 @@ impl MessagingBackend for TelegramBackend {
                         let ts = Arc::clone(&ts);
                         let sp_name = sp_name.clone();
                         let sd = sd.clone();
+                        let du = std::sync::Arc::clone(&dashboard_url_msg);
                         async move {
-                            handle_incoming(msg, bot_msg, group_id, sender, &allowed, &t2t, &ts, &sp_name, &sd).await;
+                            handle_incoming(msg, bot_msg, group_id, sender, &allowed, &t2t, &ts, &sp_name, &sd, du.as_deref()).await;
                             Ok::<_, anyhow::Error>(())
                         }
                     }
@@ -336,11 +341,13 @@ impl MessagingBackend for TelegramBackend {
                     let sender_cb = sender.clone();
                     let last_mcp_msg_cb = Arc::clone(&last_mcp_msg);
                     let last_events_msg_cb = Arc::clone(&last_events_msg);
+                    let dashboard_url_cb = dashboard_url.clone();
                     move |query: CallbackQuery| {
                         let bot_cb = bot_cb.clone();
                         let sender_cb = sender_cb.clone();
                         let last_mcp_msg_cb = Arc::clone(&last_mcp_msg_cb);
                         let last_events_msg_cb = Arc::clone(&last_events_msg_cb);
+                        let dashboard_url_cb = dashboard_url_cb.clone();
                         async move {
                             match query.data.as_deref() {
                                 Some(d) if d.starts_with("mcp:") => {
@@ -350,7 +357,7 @@ impl MessagingBackend for TelegramBackend {
                                     crate::events::handle_callback(bot_cb, query, sender_cb, last_events_msg_cb).await;
                                 }
                                 _ => {
-                                    help::handle_callback(bot_cb, query).await;
+                                    help::handle_callback(bot_cb, query, dashboard_url_cb.as_deref()).await;
                                 }
                             }
                             Ok::<_, anyhow::Error>(())
@@ -481,15 +488,24 @@ async fn handle_orch_event(
         } => {
             if let Some(msg_ref) = trigger_message {
                 if let Some(msg_id) = parse_telegram_msg_id(&msg_ref.backend, &msg_ref.opaque_id) {
+                    let state = states
+                        .entry(task_id.0.clone())
+                        .or_insert_with(|| TaskTopicState::new(None));
                     // Track which message is currently being processed.
                     if *phase == SessionPhase::Responding {
-                        let state = states
-                            .entry(task_id.0.clone())
-                            .or_insert_with(|| TaskTopicState::new(None));
                         state.processing_msg_id = Some(msg_id);
                     }
-                    // Apply emoji reaction for the current phase.
-                    apply_reaction(bot, group_id, MessageId(msg_id), phase.emoji()).await;
+                    // Apply emoji reaction only if it changed — avoids rate-limiting
+                    // when many sub-agent tasks fire PhaseChanged for the same message.
+                    let emoji = phase.emoji();
+                    let already_set = state.last_reaction
+                        .as_ref()
+                        .map(|(mid, e)| *mid == msg_id && e == emoji)
+                        .unwrap_or(false);
+                    if !already_set {
+                        state.last_reaction = Some((msg_id, emoji.to_string()));
+                        apply_reaction(bot, group_id, MessageId(msg_id), emoji).await;
+                    }
                 }
             }
         }
@@ -604,11 +620,14 @@ async fn handle_orch_event(
             state.tool_group_text.push_str(&entry);
 
             let reply_to = telegram_msg_id(trigger_ref).or(state.last_bot_message_id);
-            // Apply 👨‍💻 reaction to the triggering user message — only once per message
-            // to avoid rate-limiting from the same reaction being set repeatedly.
+            // Apply 👨‍💻 reaction to the triggering user message — only if not already set.
             if let Some(mid) = telegram_msg_id(trigger_ref) {
-                if state.working_reaction_msg_id != Some(mid) {
-                    state.working_reaction_msg_id = Some(mid);
+                let already_set = state.last_reaction
+                    .as_ref()
+                    .map(|(m, e)| *m == mid && e == "👨‍💻")
+                    .unwrap_or(false);
+                if !already_set {
+                    state.last_reaction = Some((mid, "👨‍💻".to_string()));
                     apply_reaction(bot, group_id, MessageId(mid), "👨‍💻").await;
                 }
             }
@@ -623,14 +642,24 @@ async fn handle_orch_event(
                 if should_edit {
                     use teloxide::prelude::Requester;
                     let group_text = state.tool_group_text.clone();
-                    if let Err(e) = bot
+                    match bot
                         .edit_message_text(group_id, MessageId(msg_id), &group_text)
                         .parse_mode(teloxide::types::ParseMode::Html)
                         .await
                     {
-                        warn!("telegram: tool group edit failed (msg {msg_id}): {e}");
-                    } else {
-                        state.last_tool_edit_at = Some(std::time::Instant::now());
+                        Ok(_) => { state.last_tool_edit_at = Some(std::time::Instant::now()); }
+                        Err(e) if is_message_too_long(&e) => {
+                            // Message hit Telegram's 4096-char limit — start a fresh group.
+                            state.tool_group_text = entry.clone();
+                            state.last_tool_start_offset = 0;
+                            let new_id = send_text_reply(bot, group_id, thread_id, &entry, reply_to, true).await;
+                            if let Some(id) = new_id {
+                                state.streaming.current_tool_message_id = Some(id);
+                                state.last_bot_message_id = Some(id);
+                                state.last_tool_edit_at = Some(std::time::Instant::now());
+                            }
+                        }
+                        Err(e) => { warn!("telegram: tool group edit failed (msg {msg_id}): {e}"); }
                     }
                 }
             } else {
@@ -651,6 +680,7 @@ async fn handle_orch_event(
             let state = states
                 .entry(task_id.0.clone())
                 .or_insert_with(|| TaskTopicState::new(None));
+            let thread_id = state.thread_id;
             let name = std::mem::take(&mut state.pending_tool_name);
             let summary = std::mem::take(&mut state.pending_tool_summary);
             let was_hidden = std::mem::replace(&mut state.pending_tool_hidden, false);
@@ -684,6 +714,18 @@ async fn handle_orch_event(
                     {
                         Ok(_) => { state.last_tool_edit_at = Some(std::time::Instant::now()); }
                         Err(e) if e.to_string().contains("MESSAGE_NOT_MODIFIED") => {}
+                        Err(e) if is_message_too_long(&e) => {
+                            // Message hit Telegram's 4096-char limit — start a fresh group.
+                            state.tool_group_text = completed_entry.clone();
+                            state.last_tool_start_offset = 0;
+                            let reply_to = state.last_bot_message_id;
+                            let new_id = send_text_reply(bot, group_id, thread_id, &completed_entry, reply_to, true).await;
+                            if let Some(id) = new_id {
+                                state.streaming.current_tool_message_id = Some(id);
+                                state.last_bot_message_id = Some(id);
+                                state.last_tool_edit_at = Some(std::time::Instant::now());
+                            }
+                        }
                         Err(e) => {
                             warn!("telegram: tool edit failed (msg {msg_id}): {e}");
                         }
@@ -724,7 +766,7 @@ async fn handle_orch_event(
                 apply_reaction(bot, group_id, MessageId(mid), "👍").await;
             }
             state.processing_msg_id = None;
-            state.working_reaction_msg_id = None;
+            state.last_reaction = None;
             state.last_tool_edit_at = None;
 
             // Append duration to the last response message.
@@ -753,14 +795,19 @@ async fn handle_orch_event(
                 // Turn ended with only tool calls — append stats to the tool group message.
                 use teloxide::prelude::Requester;
                 let edited = format!("{tool_group_text}\n{stats}");
-                if let Err(e) = bot
+                match bot
                     .edit_message_text(group_id, MessageId(tool_msg_id), &edited)
                     .parse_mode(teloxide::types::ParseMode::Html)
                     .await
                 {
-                    warn!("telegram: TurnComplete: failed to append stats to tool message: {e}");
-                    let reply_to = state.last_bot_message_id;
-                    send_text_reply(bot, group_id, thread_id, &stats, reply_to, false).await;
+                    Ok(_) => {}
+                    Err(e) => {
+                        if !e.to_string().contains("MESSAGE_NOT_MODIFIED") {
+                            warn!("telegram: TurnComplete: failed to append stats to tool message: {e}");
+                        }
+                        let reply_to = state.last_bot_message_id;
+                        send_text_reply(bot, group_id, thread_id, &stats, reply_to, false).await;
+                    }
                 }
             } else {
                 let reply_to = telegram_msg_id(trigger_ref).or(state.last_bot_message_id);
@@ -826,7 +873,7 @@ async fn handle_orch_event(
                 .and_then(|id| states.get(&id.0))
                 .and_then(|s| s.thread_id);
             if let Some(state) = task_id.as_ref().and_then(|id| states.get_mut(&id.0)) {
-                state.working_reaction_msg_id = None;
+                state.last_reaction = None;
                 state.last_tool_edit_at = None;
                 state.processing_msg_id = None;
             }
@@ -1112,6 +1159,12 @@ async fn send_text_reply(
     }
 }
 
+/// Returns true if the teloxide error indicates the message text is too long.
+fn is_message_too_long(e: &teloxide::RequestError) -> bool {
+    let s = e.to_string();
+    s.contains("MESSAGE_TOO_LONG") || s.contains("text is too long")
+}
+
 /// Extract a Telegram message ID from a MessageRef.
 /// opaque_id format: "{thread_id}/{msg_id}" or "{msg_id}" (legacy).
 fn telegram_msg_id(msg_ref: &Option<MessageRef>) -> Option<i32> {
@@ -1151,6 +1204,7 @@ async fn handle_incoming(
     task_states: &Arc<Mutex<HashMap<String, TaskTopicState>>>,
     scratchpad_topic_name: &str,
     state_dir: &std::path::Path,
+    dashboard_url: Option<&str>,
 ) {
     let from = match &msg.from {
         Some(u) => u,
@@ -1217,7 +1271,7 @@ async fn handle_incoming(
 
     // Handle /help before routing to orchestrator — it's backend-local.
     if msg.text().map(|t| t.split('@').next().unwrap_or(t).trim() == "/help").unwrap_or(false) {
-        crate::help::send_help(&bot, group_id, msg.thread_id, Some(msg.id.0)).await;
+        crate::help::send_help(&bot, group_id, msg.thread_id, Some(msg.id.0), dashboard_url.as_deref()).await;
         return;
     }
 
