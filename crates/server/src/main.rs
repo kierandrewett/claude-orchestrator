@@ -392,25 +392,25 @@ async fn run(config_path: PathBuf) -> Result<()> {
                 token: mcp_token,
             };
 
-            let app = Router::new()
-            .route(
-                "/ws/client",
-                get({
+            let ws_handler = {
+                let reg = Arc::clone(&reg);
+                let task_reg = Arc::clone(&task_reg);
+                let b = Arc::clone(&b);
+                move |ws: WebSocketUpgrade| {
                     let reg = Arc::clone(&reg);
                     let task_reg = Arc::clone(&task_reg);
                     let b = Arc::clone(&b);
-                    move |ws: WebSocketUpgrade| {
-                        let reg = Arc::clone(&reg);
-                        let task_reg = Arc::clone(&task_reg);
-                        let b = Arc::clone(&b);
-                        async move {
-                            ws.on_upgrade(move |socket| {
-                                client_ws::handle_client_ws(socket, reg, task_reg, b)
-                            })
-                        }
+                    async move {
+                        ws.on_upgrade(move |socket| {
+                            client_ws::handle_client_ws(socket, reg, task_reg, b)
+                        })
                     }
-                }),
-            )
+                }
+            };
+            let app = Router::new()
+            // /ws for the browser dashboard, /ws/client for the desktop client
+            .route("/ws", get(ws_handler.clone()))
+            .route("/ws/client", get(ws_handler))
             .merge(
                 Router::new()
                     .route("/api/session/:session_id/action", axum::routing::post(session_action_handler))

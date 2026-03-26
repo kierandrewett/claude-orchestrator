@@ -117,7 +117,7 @@ async function main() {
         await server.register(staticFiles, {
             root: distDir,
             prefix: '/',
-            index: false,
+            index: 'index.html',
         });
 
         // SPA fallback
