@@ -238,7 +238,15 @@ pub fn format_tool_completed(
 
 /// Format a turn_complete event as an inline suffix (italic, appended on new line).
 pub fn format_turn_complete(duration_secs: f64) -> String {
-    format!("<code>❯ in {:.1}s</code>", duration_secs)
+    let secs = duration_secs as u64;
+    let duration_str = if secs < 60 {
+        format!("{:.1}s", duration_secs)
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}hr {}m {}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+    };
+    format!("<code>❯ in {}</code>", duration_str)
 }
 
 /// Format a status message.

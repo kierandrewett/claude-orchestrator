@@ -120,6 +120,53 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Reverse-proxy a request to the dashboard Node server.
+async fn proxy_to_dashboard(
+    base_url: String,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let path_and_query = req.uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
+    let url = format!("{}{}", base_url, path_and_query);
+
+    let method = reqwest::Method::from_bytes(req.method().as_str().as_bytes())
+        .unwrap_or(reqwest::Method::GET);
+
+    let body_bytes = match axum::body::to_bytes(req.into_body(), 32 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return axum::http::StatusCode::BAD_REQUEST.into_response(),
+    };
+
+    let client = reqwest::Client::new();
+    match client.request(method, &url)
+        .body(body_bytes)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status = axum::http::StatusCode::from_u16(resp.status().as_u16())
+                .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            let mut builder = axum::response::Response::builder().status(status);
+            for (k, v) in resp.headers() {
+                if !matches!(k.as_str(), "connection" | "transfer-encoding") {
+                    builder = builder.header(k, v);
+                }
+            }
+            let bytes = resp.bytes().await.unwrap_or_default();
+            builder.body(axum::body::Body::from(bytes))
+                .unwrap_or_else(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
+        Err(e) => {
+            warn!("dashboard proxy error: {e}");
+            axum::http::StatusCode::BAD_GATEWAY.into_response()
+        }
+    }
+}
+
 async fn run(config_path: PathBuf) -> Result<()> {
     if !config_path.exists() {
         anyhow::bail!(
@@ -297,6 +344,17 @@ async fn run(config_path: PathBuf) -> Result<()> {
         }
     }
 
+    // If web backend is enabled, proxy unknown paths on client_bind to the dashboard.
+    let dashboard_proxy_url: Option<String> = config.backends.web
+        .as_ref()
+        .filter(|w| w.enabled)
+        .map(|w| {
+            let port = w.dashboard_bind.as_deref()
+                .unwrap_or("0.0.0.0:3001")
+                .split(':').last().unwrap_or("3001");
+            format!("http://localhost:{}", port)
+        });
+
     // Client-daemon WebSocket server.
     {
         let bind = config.server.client_bind.clone();
@@ -348,6 +406,15 @@ async fn run(config_path: PathBuf) -> Result<()> {
                     .route("/mcp", get(mcp::mcp_sse_handler).post(mcp::mcp_post_handler))
                     .with_state(mcp_state),
             );
+
+            let app = if let Some(proxy_url) = dashboard_proxy_url {
+                info!("proxying dashboard requests to {proxy_url}");
+                app.fallback(move |req: axum::extract::Request| {
+                    proxy_to_dashboard(proxy_url.clone(), req)
+                })
+            } else {
+                app
+            };
 
             let listener = match tokio::net::TcpListener::bind(&bind).await {
                 Ok(l) => {
