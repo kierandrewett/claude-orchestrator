@@ -14,7 +14,7 @@ export function SessionViewer() {
     const id = params.id ?? '';
     const navigate = useNavigate();
 
-    const { data: tasks } = trpc.tasks.list.useQuery(undefined, { refetchInterval: 3000 });
+    const { data: tasks } = trpc.tasks.list.useQuery();
     const task = tasks?.find((t) => t.id === id);
 
     const { data: events } = useQuery<OrchestratorEvent[]>({

@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import type { OrchestratorEvent, TaskInfo } from '../types';
+import type { OrchestratorEvent } from '../types';
 
 export function useSSE() {
     const queryClient = useQueryClient();
@@ -49,51 +49,27 @@ export function useSSE() {
             ]);
         }
 
+        // tRPC caches tasks.list at this key prefix.
+        const tasksQueryKey = [['tasks', 'list']];
+
+        function invalidateTasks() {
+            void queryClient.invalidateQueries({ queryKey: tasksQueryKey });
+        }
+
         function handleEvent(event: OrchestratorEvent) {
             if ('TaskCreated' in event) {
-                const { task_id, name, profile } = event.TaskCreated;
-                const task: TaskInfo = {
-                    id: task_id,
-                    name,
-                    profile,
-                    state: 'Running',
-                    created_at: new Date().toISOString(),
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    cost_usd: 0,
-                    turns: 0,
-                };
-                queryClient.setQueryData<{ tasks: TaskInfo[] }>(['tasks'], (old) => ({
-                    tasks: [task, ...(old?.tasks ?? []).filter((t) => t.id !== task_id)],
-                }));
+                invalidateTasks();
                 return;
             }
 
             if ('TaskStateChanged' in event) {
-                const { task_id, new_state } = event.TaskStateChanged;
-                queryClient.setQueryData<{ tasks: TaskInfo[] }>(['tasks'], (old) => ({
-                    tasks: (old?.tasks ?? []).map((t) =>
-                        t.id === task_id ? { ...t, state: new_state } : t,
-                    ),
-                }));
+                invalidateTasks();
                 return;
             }
 
             if ('TurnComplete' in event) {
-                const { task_id, usage } = event.TurnComplete;
-                queryClient.setQueryData<{ tasks: TaskInfo[] }>(['tasks'], (old) => ({
-                    tasks: (old?.tasks ?? []).map((t) =>
-                        t.id === task_id
-                            ? {
-                                  ...t,
-                                  input_tokens: t.input_tokens + usage.input_tokens,
-                                  output_tokens: t.output_tokens + usage.output_tokens,
-                                  cost_usd: t.cost_usd + usage.total_cost_usd,
-                                  turns: t.turns + usage.turns,
-                              }
-                            : t,
-                    ),
-                }));
+                const { task_id } = event.TurnComplete;
+                invalidateTasks();
                 appendHistory(task_id, event);
                 return;
             }

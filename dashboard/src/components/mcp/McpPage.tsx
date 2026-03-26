@@ -39,6 +39,7 @@ export function McpPage() {
                     <p className="text-xs text-zinc-500 leading-relaxed">
                         MCP servers are loaded at session start. When you add, remove, or toggle a server,
                         any hibernated tasks are automatically restarted so they pick up the new config.
+                        While a task is running, each server shows whether its tools are connected.
                     </p>
                     <p className="text-xs text-zinc-600 flex items-center gap-1 mt-1">
                         <RefreshCw size={10} />

@@ -24,9 +24,36 @@ async function wakeHibernatedTasks(): Promise<void> {
     }
 }
 
+interface SessionToolsResponse {
+    tools: string[];
+    has_running_session: boolean;
+}
+
+async function getSessionTools(): Promise<SessionToolsResponse> {
+    try {
+        return await callApi('GET', '/api/mcp/session-tools') as SessionToolsResponse;
+    } catch {
+        return { tools: [], has_running_session: false };
+    }
+}
+
 export const mcpRouter = router({
     list: publicProcedure.query(async () => {
-        return listServers(STATE_DIR);
+        const [servers, { tools, has_running_session }] = await Promise.all([
+            listServers(STATE_DIR),
+            getSessionTools(),
+        ]);
+
+        // Derive per-server connection status from session tool names.
+        // Claude Code names MCP tools as `mcp__<servername>__<toolname>`.
+        return servers.map(server => {
+            let connected: boolean | null = null;
+            if (has_running_session) {
+                const prefix = `mcp__${server.name}__`;
+                connected = tools.some(t => t.startsWith(prefix));
+            }
+            return { ...server, connected };
+        });
     }),
 
     add: publicProcedure

@@ -35,6 +35,8 @@ pub fn router(state: InternalApiState) -> Router {
         .route("/api/tasks/:id/message", post(send_message))
         .route("/api/tasks/:id/hibernate", post(hibernate_task))
         .route("/api/tasks/:id/wake", post(wake_task))
+        // MCP session status
+        .route("/api/mcp/session-tools", get(mcp_session_tools))
         // Scheduled events
         .route("/api/scheduled-events", get(list_events))
         .route("/api/scheduled-events", post(create_event))
@@ -129,6 +131,28 @@ async fn wake_task(
     State(state): State<InternalApiState>,
 ) -> Result<Json<Value>, StatusCode> {
     emit_command(&state, ParsedCommand::Wake, Some(TaskId(id))).await
+}
+
+// ── MCP session status ─────────────────────────────────────────────────────────
+
+async fn mcp_session_tools(State(state): State<InternalApiState>) -> Json<Value> {
+    // Collect the union of available tools across all running tasks.
+    let mut tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut has_running = false;
+    for id in state.registry.all_ids() {
+        state.registry.with(&id, |t| {
+            if matches!(t.state, TaskState::Running { .. }) {
+                has_running = true;
+                for tool in &t.config.available_tools {
+                    tools.insert(tool.clone());
+                }
+            }
+        });
+    }
+    Json(json!({
+        "tools": tools.into_iter().collect::<Vec<_>>(),
+        "has_running_session": has_running,
+    }))
 }
 
 // ── Scheduled event handlers ───────────────────────────────────────────────────

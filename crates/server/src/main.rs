@@ -394,7 +394,8 @@ async fn run(config_path: PathBuf) -> Result<()> {
                 token: mcp_token,
             };
 
-            let ws_handler = {
+            // /ws/client — Claude Code daemon WebSocket (C2S protocol)
+            let daemon_ws_handler = {
                 let reg = Arc::clone(&reg);
                 let task_reg = Arc::clone(&task_reg);
                 let b = Arc::clone(&b);
@@ -409,6 +410,39 @@ async fn run(config_path: PathBuf) -> Result<()> {
                     }
                 }
             };
+
+            // /ws — browser dashboard WebSocket (broadcasts OrchestratorEvents)
+            let (fwd_tx, _) = tokio::sync::broadcast::channel::<claude_events::OrchestratorEvent>(512);
+            let fwd_tx = Arc::new(fwd_tx);
+            {
+                let fwd_tx = Arc::clone(&fwd_tx);
+                let mut orch_rx = b.subscribe_orchestrator();
+                tokio::spawn(async move {
+                    loop {
+                        match orch_rx.recv().await {
+                            Ok(ev) => { let _ = fwd_tx.send(ev); }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                tracing::warn!("browser-ws forwarder lagged {n} events");
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                });
+            }
+            let browser_ws_handler = {
+                let fwd_tx = Arc::clone(&fwd_tx);
+                let backend_tx = b.backend_sender();
+                move |ws: WebSocketUpgrade| {
+                    let rx = fwd_tx.subscribe();
+                    let tx = backend_tx.clone();
+                    async move {
+                        ws.on_upgrade(move |socket| {
+                            backend_web::ws::handle_ws_client(socket, rx, tx)
+                        })
+                    }
+                }
+            };
+
             let internal_api_state = internal_api::InternalApiState {
                 registry: Arc::clone(&task_reg),
                 backend_tx: b.backend_sender(),
@@ -416,9 +450,10 @@ async fn run(config_path: PathBuf) -> Result<()> {
             };
 
             let app = Router::new()
-            // /ws for the browser dashboard, /ws/client for the desktop client
-            .route("/ws", get(ws_handler.clone()))
-            .route("/ws/client", get(ws_handler))
+            // /ws — browser dashboard (broadcasts OrchestratorEvents as JSON)
+            .route("/ws", get(browser_ws_handler))
+            // /ws/client — Claude Code daemon (C2S/S2C protocol)
+            .route("/ws/client", get(daemon_ws_handler))
             .merge(internal_api::router(internal_api_state))
             .merge(
                 Router::new()

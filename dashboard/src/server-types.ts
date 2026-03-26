@@ -30,6 +30,8 @@ export interface McpServerEntry {
 export interface McpServer extends McpServerEntry {
     builtin: boolean;
     enabled: boolean;
+    /** null = no running session to check; true = tools loaded; false = failed to connect */
+    connected?: boolean | null;
 }
 
 export interface RawServerConfig {

@@ -1,4 +1,4 @@
-import { Shield, Trash2, Copy, Check, Terminal, Globe } from 'lucide-react';
+import { Shield, Trash2, Copy, Check, Terminal, Globe, AlertCircle } from 'lucide-react';
 import * as React from 'react';
 import { Switch } from '../ui/switch';
 import { trpc } from '../../api/trpc';
@@ -61,6 +61,18 @@ export function McpServerCard({ server }: McpServerCardProps) {
                         <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full border border-zinc-700/50 text-zinc-600 bg-zinc-800/40 uppercase tracking-wide">
                             {isUrl ? 'URL' : 'Command'}
                         </span>
+                        {server.connected === true && (
+                            <span className="flex items-center gap-1 text-[9px] font-semibold px-1.5 py-0.5 rounded-full border border-emerald-500/20 text-emerald-400 bg-emerald-500/10 uppercase tracking-wide">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
+                                Connected
+                            </span>
+                        )}
+                        {server.connected === false && server.enabled && (
+                            <span className="flex items-center gap-1 text-[9px] font-semibold px-1.5 py-0.5 rounded-full border border-red-500/20 text-red-400 bg-red-500/10 uppercase tracking-wide">
+                                <AlertCircle size={9} />
+                                Not connected
+                            </span>
+                        )}
                     </div>
                     {commandStr && (
                         <div className="flex items-center gap-1 mt-0.5">
