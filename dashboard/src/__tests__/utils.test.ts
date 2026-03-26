@@ -48,11 +48,19 @@ describe('formatTokens', () => {
 });
 
 describe('getStatusDot', () => {
-    it('returns emerald for running', () => {
-        expect(getStatusDot('running')).toContain('emerald');
+    it('returns emerald for Running', () => {
+        expect(getStatusDot('Running')).toContain('emerald');
     });
 
-    it('returns red for failed', () => {
-        expect(getStatusDot('failed')).toContain('red');
+    it('returns amber for Hibernated', () => {
+        expect(getStatusDot('Hibernated')).toContain('amber');
+    });
+
+    it('returns zinc for Dead', () => {
+        expect(getStatusDot('Dead')).toContain('zinc');
+    });
+
+    it('returns zinc for unknown state', () => {
+        expect(getStatusDot('unknown')).toContain('zinc');
     });
 });
