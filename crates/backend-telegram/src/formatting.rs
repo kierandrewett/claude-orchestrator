@@ -168,29 +168,42 @@ fn tool_detail(tool_name: &str, summary: &str) -> String {
 // Public formatters
 // ---------------------------------------------------------------------------
 
-/// Format a tool_started event.
-pub fn format_tool_started(tool_name: &str, summary: &str) -> String {
-    let emoji = tool_emoji(tool_name);
-    let name = if tool_name == "Agent" {
-        let (subagent_type, detail) = agent_display(summary);
-        return format!("{emoji} <b>{}</b>\n{}", escape_html(&subagent_type), detail);
-    } else {
-        display_name(tool_name)
-    };
-    let detail = tool_detail(tool_name, summary);
-    if detail.is_empty() {
-        format!("{emoji} <b>{}</b>", escape_html(&name))
-    } else {
-        format!("{emoji} <b>{}</b>\n{}", escape_html(&name), detail)
+/// Prefix a tool entry with the sub-tool indent marker.
+/// Only the first line gets the `↳` prefix; subsequent lines (detail blocks) are unchanged.
+fn indent_tool_entry(entry: &str) -> String {
+    match entry.split_once('\n') {
+        Some((first, rest)) => format!(" ↳ {}\n{}", first, rest),
+        None => format!(" ↳ {}", entry),
     }
 }
 
+/// Format a tool_started event.
+/// `indent` is true when this tool is nested inside an Agent group.
+pub fn format_tool_started(tool_name: &str, summary: &str, indent: bool) -> String {
+    let emoji = tool_emoji(tool_name);
+    let entry = if tool_name == "Agent" {
+        let (subagent_type, detail) = agent_display(summary);
+        format!("{emoji} <b>{}</b>\n{}", escape_html(&subagent_type), detail)
+    } else {
+        let name = display_name(tool_name);
+        let detail = tool_detail(tool_name, summary);
+        if detail.is_empty() {
+            format!("{emoji} <b>{}</b>", escape_html(&name))
+        } else {
+            format!("{emoji} <b>{}</b>\n{}", escape_html(&name), detail)
+        }
+    };
+    if indent { indent_tool_entry(&entry) } else { entry }
+}
+
 /// Format a tool_completed event (replaces the started message).
+/// `indent` is true when this tool is nested inside an Agent group.
 pub fn format_tool_completed(
     tool_name: &str,
     summary: &str,
     is_error: bool,
     preview: Option<&str>,
+    indent: bool,
 ) -> String {
     let emoji = tool_emoji(tool_name);
     let status = if is_error { "❌" } else { "✅" };
@@ -215,11 +228,12 @@ pub fn format_tool_completed(
             format!("\n<code>{}</code>", escape_html(&truncated))
         })
         .unwrap_or_default();
-    if detail.is_empty() {
+    let entry = if detail.is_empty() {
         format!("{status} {emoji} <b>{}</b>{}", escape_html(&name), preview_str)
     } else {
         format!("{status} {emoji} <b>{}</b>\n{}{}", escape_html(&name), detail, preview_str)
-    }
+    };
+    if indent { indent_tool_entry(&entry) } else { entry }
 }
 
 /// Format a turn_complete event as an inline suffix (italic, appended on new line).

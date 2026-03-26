@@ -82,6 +82,10 @@ struct TaskTopicState {
     pending_tool_summary: String,
     /// True if the pending tool is in the hidden_tools list (suppress display).
     pending_tool_hidden: bool,
+    /// True if the current tool group was started by an Agent tool (sub-tools get indented).
+    tool_group_is_agent: bool,
+    /// True if the pending tool is a sub-tool inside an Agent group (indent its completion).
+    pending_is_sub_tool: bool,
     /// Accumulated HTML for the current tool group message.
     tool_group_text: String,
     /// Byte offset in `tool_group_text` where the last pending tool entry starts.
@@ -109,6 +113,8 @@ impl TaskTopicState {
             pending_tool_name: String::new(),
             pending_tool_summary: String::new(),
             pending_tool_hidden: false,
+            tool_group_is_agent: false,
+            pending_is_sub_tool: false,
             tool_group_text: String::new(),
             last_tool_start_offset: 0,
             last_bot_message_id: None,
@@ -602,14 +608,30 @@ async fn handle_orch_event(
             }
             state.pending_tool_hidden = false;
 
+            // Agent tool: always start a fresh group so the agent header + its
+            // sub-tools get their own message, separate from the parent's tools.
+            if tool_name == "Agent" {
+                state.tool_group_text.clear();
+                state.streaming.current_tool_message_id = None;
+                state.last_tool_edit_at = None;
+                state.tool_group_is_agent = true;
+            }
+
             // If no current tool group message exists, we're starting fresh — clear any
             // stale content from a previous turn that wasn't cleared by TextOutput
             // (happens when a turn starts directly with a tool, not text).
             if state.streaming.current_tool_message_id.is_none() {
                 state.tool_group_text.clear();
+                if tool_name != "Agent" {
+                    state.tool_group_is_agent = false;
+                }
             }
 
-            let entry = format_tool_started(tool_name, summary);
+            // Sub-tools inside an Agent group get indented.
+            let is_sub = state.tool_group_is_agent && tool_name != "Agent";
+            state.pending_is_sub_tool = is_sub;
+
+            let entry = format_tool_started(tool_name, summary, is_sub);
 
             // Append to the tool group, recording where this entry starts so
             // ToolCompleted can replace just this entry with the completed version.
@@ -684,6 +706,7 @@ async fn handle_orch_event(
             let name = std::mem::take(&mut state.pending_tool_name);
             let summary = std::mem::take(&mut state.pending_tool_summary);
             let was_hidden = std::mem::replace(&mut state.pending_tool_hidden, false);
+            let is_sub = std::mem::replace(&mut state.pending_is_sub_tool, false);
 
             // Hidden tool: no display update needed.
             if was_hidden {
@@ -691,7 +714,7 @@ async fn handle_orch_event(
             }
 
             let completed_entry =
-                format_tool_completed(&name, &summary, *is_error, output_preview.as_deref());
+                format_tool_completed(&name, &summary, *is_error, output_preview.as_deref(), is_sub);
 
             // Replace the pending entry (from last_tool_start_offset onward) with the
             // completed version — this handles multi-tool groups correctly.
