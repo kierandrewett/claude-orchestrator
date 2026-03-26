@@ -71,8 +71,9 @@ function accumulateEvents(events: OrchestratorEvent[]): ConversationTurn[] {
         if ('ToolCompleted' in event) {
             const { tool_name, summary, is_error, output_preview } = event.ToolCompleted;
             if (currentAssistantTurn) {
-                const block = [...currentAssistantTurn.blocks].reverse()
-                    .find(b => b.type === 'tool_use' && b.name === tool_name && !b.done);
+                const turn = currentAssistantTurn as ConversationTurn;
+                const block = [...turn.blocks].reverse()
+                    .find(b => b.type === 'tool_use' && (b as ToolUseBlock).name === tool_name && !(b as ToolUseBlock).done);
                 if (block?.type === 'tool_use') block.done = true;
             }
             turns.push({ role: 'user', blocks: [{ type: 'tool_result', tool_use_id: tool_name, content: output_preview ?? summary, is_error }] });
@@ -80,7 +81,8 @@ function accumulateEvents(events: OrchestratorEvent[]): ConversationTurn[] {
         }
         if ('TurnComplete' in event) {
             if (currentAssistantTurn) {
-                for (const block of currentAssistantTurn.blocks) {
+                const turn = currentAssistantTurn as ConversationTurn;
+                for (const block of turn.blocks) {
                     if (block.type === 'text') block.done = true;
                 }
             }

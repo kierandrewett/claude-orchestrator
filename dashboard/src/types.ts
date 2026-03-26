@@ -13,6 +13,7 @@ export interface TaskInfo {
     output_tokens: number;
     cost_usd: number;
     turns: number;
+    last_activity?: string;
 }
 
 // UsageStats matching Rust UsageStats

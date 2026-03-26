@@ -1,24 +1,22 @@
-import { useNavigate } from '@tanstack/react-router';
+import { useNavigate, useParams } from '@tanstack/react-router';
 import { ArrowLeft, Square } from 'lucide-react';
 import { useQuery, useMutation } from '@tanstack/react-query';
-import { fetchTasks, stopTask } from '../../api/client';
-import { sessionRoute } from '../../router';
+import { stopTask } from '../../api/client';
 import { cn, getStatusBgColor, getStatusDot } from '../../lib/utils';
 import { StatsPanel } from './StatsPanel';
 import { EventStream } from './EventStream';
 import { InputBar } from './InputBar';
-import type { TaskInfo, OrchestratorEvent } from '../../types';
+import { trpc } from '../../api/trpc';
+import type { OrchestratorEvent } from '../../types';
 
 export function SessionViewer() {
-    const { id } = sessionRoute.useParams();
+    const params = useParams({ strict: false }) as { id?: string };
+    const id = params.id ?? '';
     const navigate = useNavigate();
 
-    const { data: tasksData } = useQuery({
-        queryKey: ['tasks'],
-        queryFn: fetchTasks,
-        staleTime: 0,
-    });
-    const task: TaskInfo | undefined = tasksData?.tasks.find((t) => t.id === id);
+    // Use tRPC for task list
+    const { data: tasks } = trpc.tasks.list.useQuery(undefined, { refetchInterval: 3000 });
+    const task = tasks?.find((t) => t.id === id);
 
     const { data: events } = useQuery<OrchestratorEvent[]>({
         queryKey: ['history', id],
@@ -34,10 +32,10 @@ export function SessionViewer() {
             <div className="flex flex-col items-center justify-center h-full gap-3 text-zinc-600">
                 <p className="text-sm">Task not found.</p>
                 <button
-                    onClick={() => void navigate({ to: '/' })}
+                    onClick={() => void navigate({ to: '/tasks' })}
                     className="text-sm text-zinc-500 hover:text-zinc-300 flex items-center gap-1.5 transition-colors"
                 >
-                    <ArrowLeft size={14} /> Back
+                    <ArrowLeft size={14} /> Back to Tasks
                 </button>
             </div>
         );
@@ -55,8 +53,8 @@ export function SessionViewer() {
         <div className="flex flex-col h-full overflow-hidden">
             <div className="flex items-center gap-2 px-3 py-2.5 border-b border-zinc-800/80 bg-zinc-950 shrink-0">
                 <button
-                    onClick={() => void navigate({ to: '/' })}
-                    className="lg:hidden p-1.5 rounded-lg text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
+                    onClick={() => void navigate({ to: '/tasks' })}
+                    className="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
                 >
                     <ArrowLeft size={16} />
                 </button>

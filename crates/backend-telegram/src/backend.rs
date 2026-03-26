@@ -90,6 +90,10 @@ struct TaskTopicState {
     last_bot_message_id: Option<i32>,
     /// Latest conversation title (set by ConversationRenamed). Used as link text in /status.
     display_title: String,
+    /// Message ID that already has the 👨‍💻 reaction set this turn — skip redundant API calls.
+    working_reaction_msg_id: Option<i32>,
+    /// Timestamp of the last tool-group edit, used to rate-limit edits to ~1 per 2 s.
+    last_tool_edit_at: Option<std::time::Instant>,
 }
 
 impl TaskTopicState {
@@ -107,6 +111,8 @@ impl TaskTopicState {
             last_tool_start_offset: 0,
             last_bot_message_id: None,
             display_title: String::new(),
+            working_reaction_msg_id: None,
+            last_tool_edit_at: None,
         }
     }
 }
@@ -598,21 +604,34 @@ async fn handle_orch_event(
             state.tool_group_text.push_str(&entry);
 
             let reply_to = telegram_msg_id(trigger_ref).or(state.last_bot_message_id);
-            // Apply 👨‍💻 reaction to the triggering user message.
+            // Apply 👨‍💻 reaction to the triggering user message — only once per message
+            // to avoid rate-limiting from the same reaction being set repeatedly.
             if let Some(mid) = telegram_msg_id(trigger_ref) {
-                apply_reaction(bot, group_id, MessageId(mid), "👨‍💻").await;
+                if state.working_reaction_msg_id != Some(mid) {
+                    state.working_reaction_msg_id = Some(mid);
+                    apply_reaction(bot, group_id, MessageId(mid), "👨‍💻").await;
+                }
             }
 
             if let Some(msg_id) = state.streaming.current_tool_message_id {
-                // Edit existing group message to append the new entry.
-                use teloxide::prelude::Requester;
-                let group_text = state.tool_group_text.clone();
-                if let Err(e) = bot
-                    .edit_message_text(group_id, MessageId(msg_id), &group_text)
-                    .parse_mode(teloxide::types::ParseMode::Html)
-                    .await
-                {
-                    warn!("telegram: tool group edit failed (msg {msg_id}): {e}");
+                // Edit existing group message — rate-limited to at most 1 edit per 2 s.
+                // ToolCompleted and TurnComplete will ensure the final state is always shown.
+                const TOOL_EDIT_THROTTLE_MS: u128 = 2000;
+                let should_edit = state.last_tool_edit_at
+                    .map(|t| t.elapsed().as_millis() >= TOOL_EDIT_THROTTLE_MS)
+                    .unwrap_or(true);
+                if should_edit {
+                    use teloxide::prelude::Requester;
+                    let group_text = state.tool_group_text.clone();
+                    if let Err(e) = bot
+                        .edit_message_text(group_id, MessageId(msg_id), &group_text)
+                        .parse_mode(teloxide::types::ParseMode::Html)
+                        .await
+                    {
+                        warn!("telegram: tool group edit failed (msg {msg_id}): {e}");
+                    } else {
+                        state.last_tool_edit_at = Some(std::time::Instant::now());
+                    }
                 }
             } else {
                 let msg_id = send_text_reply(bot, group_id, thread_id, &entry, reply_to, true).await;
@@ -651,16 +670,23 @@ async fn handle_orch_event(
             let group_text = state.tool_group_text.clone();
 
             if let Some(msg_id) = state.streaming.current_tool_message_id {
-                use teloxide::prelude::Requester;
-                match bot
-                    .edit_message_text(group_id, MessageId(msg_id), &group_text)
-                    .parse_mode(teloxide::types::ParseMode::Html)
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(e) if e.to_string().contains("MESSAGE_NOT_MODIFIED") => {}
-                    Err(e) => {
-                        warn!("telegram: tool edit failed (msg {msg_id}): {e}");
+                // Rate-limit edits to ~1 per 2 s; TurnComplete always shows the final state.
+                const TOOL_EDIT_THROTTLE_MS: u128 = 2000;
+                let should_edit = state.last_tool_edit_at
+                    .map(|t| t.elapsed().as_millis() >= TOOL_EDIT_THROTTLE_MS)
+                    .unwrap_or(true);
+                if should_edit {
+                    use teloxide::prelude::Requester;
+                    match bot
+                        .edit_message_text(group_id, MessageId(msg_id), &group_text)
+                        .parse_mode(teloxide::types::ParseMode::Html)
+                        .await
+                    {
+                        Ok(_) => { state.last_tool_edit_at = Some(std::time::Instant::now()); }
+                        Err(e) if e.to_string().contains("MESSAGE_NOT_MODIFIED") => {}
+                        Err(e) => {
+                            warn!("telegram: tool edit failed (msg {msg_id}): {e}");
+                        }
                     }
                 }
             } else {
@@ -698,6 +724,8 @@ async fn handle_orch_event(
                 apply_reaction(bot, group_id, MessageId(mid), "👍").await;
             }
             state.processing_msg_id = None;
+            state.working_reaction_msg_id = None;
+            state.last_tool_edit_at = None;
 
             // Append duration to the last response message.
             let last_msg_id = state.streaming.current_message_id;
@@ -797,6 +825,11 @@ async fn handle_orch_event(
                 .as_ref()
                 .and_then(|id| states.get(&id.0))
                 .and_then(|s| s.thread_id);
+            if let Some(state) = task_id.as_ref().and_then(|id| states.get_mut(&id.0)) {
+                state.working_reaction_msg_id = None;
+                state.last_tool_edit_at = None;
+                state.processing_msg_id = None;
+            }
             let reply_to = telegram_msg_id(trigger_ref);
             // Apply 🤬 reaction to the message that caused the error.
             if let Some(mid) = reply_to {
