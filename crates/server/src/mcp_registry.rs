@@ -12,6 +12,9 @@ pub struct McpServerEntry {
     /// URL for HTTP/SSE transport. When set, `command` and `args` are ignored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Transport type for URL-based servers: "http" (streamable HTTP, default) or "sse".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub headers: HashMap<String, String>,
     #[serde(default)]

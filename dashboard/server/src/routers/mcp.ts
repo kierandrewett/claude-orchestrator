@@ -11,6 +11,7 @@ const McpServerEntryInput = z.object({
     args: z.array(z.string()).optional(),
     env: z.record(z.string()).optional(),
     url: z.string().nullable().optional(),
+    transport: z.string().optional(),
 });
 
 /** Wake all hibernated tasks so they pick up the new MCP config on next session start. */

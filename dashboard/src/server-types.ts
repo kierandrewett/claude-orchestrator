@@ -24,6 +24,8 @@ export interface McpServerEntry {
     args?: string[];
     env?: Record<string, string>;
     url?: string | null;
+    /** Transport type for URL-based servers: "http" (default) or "sse". */
+    transport?: string;
     disabled?: boolean;
 }
 

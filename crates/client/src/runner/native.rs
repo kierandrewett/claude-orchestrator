@@ -71,13 +71,16 @@ impl Runner for NativeRunner {
                 continue;
             }
             let entry = if let Some(ref url) = srv.url {
+                // Default to "http" (streamable HTTP, MCP 2025-06-18) for user servers.
+                // Users can set transport = "sse" explicitly for older servers.
+                let transport = srv.transport.as_deref().unwrap_or("http");
                 if srv.headers.is_empty() {
-                    serde_json::json!({ "type": "sse", "url": url })
+                    serde_json::json!({ "type": transport, "url": url })
                 } else {
                     let hdrs: serde_json::Map<String, serde_json::Value> = srv.headers.iter()
                         .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
                         .collect();
-                    serde_json::json!({ "type": "sse", "url": url, "headers": hdrs })
+                    serde_json::json!({ "type": transport, "url": url, "headers": hdrs })
                 }
             } else {
                 let srv_env: serde_json::Map<String, serde_json::Value> = srv.env.iter()

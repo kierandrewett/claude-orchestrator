@@ -96,6 +96,7 @@ impl Orchestrator {
             .map(|s| claude_shared::McpServerDef {
                 name: s.name,
                 url: s.url,
+                transport: s.transport,
                 headers: s.headers,
                 command: s.command,
                 args: s.args,
@@ -496,6 +497,7 @@ impl Orchestrator {
                 let result = self.mcp_registry.add(McpServerEntry {
                     name: name.clone(),
                     url: url.clone(),
+                    transport: None,
                     headers,
                     command: command.clone(),
                     args: args.clone(),
