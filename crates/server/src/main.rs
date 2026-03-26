@@ -308,7 +308,8 @@ async fn run(config_path: PathBuf) -> Result<()> {
     }
 
     // Spawn Node.js dashboard server alongside the web API.
-    if let Some(ref web_cfg) = config.backends.web {
+    // Only set dashboard_proxy_url if we actually find and spawn the server.
+    let dashboard_proxy_url: Option<String> = if let Some(ref web_cfg) = config.backends.web {
         if web_cfg.enabled {
             let api_bind = web_cfg.bind.clone().unwrap_or_else(|| "0.0.0.0:8080".to_string());
             let orch_api = format!("http://{}", api_bind.replace("0.0.0.0", "localhost"));
@@ -324,6 +325,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
             ];
 
             if let Some(server_js) = candidates.into_iter().find(|p| p.exists()) {
+                let proxy_url = format!("http://localhost:{}", dashboard_port);
                 tokio::spawn(async move {
                     let mut cmd = tokio::process::Command::new("node");
                     cmd.arg(&server_js)
@@ -338,22 +340,17 @@ async fn run(config_path: PathBuf) -> Result<()> {
                         Err(e) => tracing::error!("failed to start dashboard server: {e}"),
                     }
                 });
+                Some(proxy_url)
             } else {
                 info!("dashboard/dist-server/index.cjs not found - skipping dashboard spawn (run: cd dashboard && npm run build)");
+                None
             }
+        } else {
+            None
         }
-    }
-
-    // If web backend is enabled, proxy unknown paths on client_bind to the dashboard.
-    let dashboard_proxy_url: Option<String> = config.backends.web
-        .as_ref()
-        .filter(|w| w.enabled)
-        .map(|w| {
-            let port = w.dashboard_bind.as_deref()
-                .unwrap_or("0.0.0.0:3001")
-                .split(':').last().unwrap_or("3001");
-            format!("http://localhost:{}", port)
-        });
+    } else {
+        None
+    };
 
     // Client-daemon WebSocket server.
     {
