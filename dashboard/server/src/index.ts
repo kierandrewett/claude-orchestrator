@@ -11,6 +11,7 @@ import { orchestratorEvents, getEventLog, type OrchestratorEvent } from './lib/o
 
 // ── Config from env ───────────────────────────────────────────────────────────
 
+const UNIX_SOCKET = process.env.UNIX_SOCKET;
 const PORT = parseInt(process.env.PORT ?? '3001', 10);
 const DASHBOARD_TOKEN = process.env.DASHBOARD_TOKEN ?? '';
 
@@ -135,8 +136,14 @@ async function main() {
     // ── Start ─────────────────────────────────────────────────────────────────────
 
     try {
-        await server.listen({ port: PORT, host: '0.0.0.0' });
-        console.log(`Dashboard server listening on http://0.0.0.0:${PORT}`);
+        if (UNIX_SOCKET) {
+            try { fs.unlinkSync(UNIX_SOCKET); } catch {}
+            await server.listen({ path: UNIX_SOCKET });
+            console.log(`Dashboard server listening on unix:${UNIX_SOCKET}`);
+        } else {
+            await server.listen({ port: PORT, host: '0.0.0.0' });
+            console.log(`Dashboard server listening on http://0.0.0.0:${PORT}`);
+        }
     } catch (err) {
         server.log.error(err);
         process.exit(1);

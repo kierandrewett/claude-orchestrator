@@ -120,33 +120,48 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Reverse-proxy a request to the dashboard Node server.
+/// Reverse-proxy a request to the dashboard Node server via Unix socket.
 async fn proxy_to_dashboard(
-    base_url: String,
+    socket_path: Arc<str>,
     req: axum::extract::Request,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
+    use http_body_util::{BodyExt, Full};
+    use hyper_util::rt::TokioIo;
 
-    let path_and_query = req.uri()
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/");
-    let url = format!("{}{}", base_url, path_and_query);
-
-    let method = reqwest::Method::from_bytes(req.method().as_str().as_bytes())
-        .unwrap_or(reqwest::Method::GET);
-
-    let body_bytes = match axum::body::to_bytes(req.into_body(), 32 * 1024 * 1024).await {
-        Ok(b) => b,
-        Err(_) => return axum::http::StatusCode::BAD_REQUEST.into_response(),
+    let stream = match tokio::net::UnixStream::connect(socket_path.as_ref()).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("dashboard proxy: {e}");
+            return axum::http::StatusCode::BAD_GATEWAY.into_response();
+        }
     };
 
-    let client = reqwest::Client::new();
-    match client.request(method, &url)
-        .body(body_bytes)
-        .send()
-        .await
-    {
+    let (mut sender, conn) =
+        match hyper::client::conn::http1::handshake(TokioIo::new(stream)).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("dashboard proxy: {e}");
+                return axum::http::StatusCode::BAD_GATEWAY.into_response();
+            }
+        };
+    tokio::spawn(conn);
+
+    // Collect body; rebuild request with path-only URI for HTTP/1.1.
+    let (mut parts, body) = req.into_parts();
+    let body_bytes = match body.collect().await {
+        Ok(c) => c.to_bytes(),
+        Err(_) => return axum::http::StatusCode::BAD_REQUEST.into_response(),
+    };
+    let path = parts.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    parts.uri = path.parse().unwrap_or_else(|_| hyper::Uri::from_static("/"));
+    parts.headers.insert(
+        hyper::header::HOST,
+        hyper::header::HeaderValue::from_static("localhost"),
+    );
+    let hyper_req = hyper::Request::from_parts(parts, Full::new(body_bytes));
+
+    match sender.send_request(hyper_req).await {
         Ok(resp) => {
             let status = axum::http::StatusCode::from_u16(resp.status().as_u16())
                 .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
@@ -156,12 +171,15 @@ async fn proxy_to_dashboard(
                     builder = builder.header(k, v);
                 }
             }
-            let bytes = resp.bytes().await.unwrap_or_default();
+            let bytes = match resp.into_body().collect().await {
+                Ok(c) => c.to_bytes(),
+                Err(_) => return axum::http::StatusCode::BAD_GATEWAY.into_response(),
+            };
             builder.body(axum::body::Body::from(bytes))
                 .unwrap_or_else(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
         Err(e) => {
-            warn!("dashboard proxy error: {e}");
+            warn!("dashboard proxy: {e}");
             axum::http::StatusCode::BAD_GATEWAY.into_response()
         }
     }
@@ -308,39 +326,39 @@ async fn run(config_path: PathBuf) -> Result<()> {
     }
 
     // Spawn Node.js dashboard server alongside the web API.
-    // Only set dashboard_proxy_url if we actually find and spawn the server.
-    let dashboard_proxy_url: Option<String> = if let Some(ref web_cfg) = config.backends.web {
+    // Communicates via a Unix socket to avoid TCP port conflicts and IPv6 issues.
+    let dashboard_socket: Option<Arc<str>> = if let Some(ref web_cfg) = config.backends.web {
         if web_cfg.enabled {
             let api_bind = web_cfg.bind.clone().unwrap_or_else(|| "0.0.0.0:8080".to_string());
             let orch_api = format!("http://{}", api_bind.replace("0.0.0.0", "127.0.0.1"));
-            let dashboard_port = web_cfg.dashboard_bind.as_deref()
-                .unwrap_or("0.0.0.0:3001")
-                .split(':').last().unwrap_or("3001").to_string();
+            let orch_ws = orch_api.replacen("http://", "ws://", 1) + "/ws";
             let dashboard_token = web_cfg.dashboard_token.clone().unwrap_or_default();
             let config_path_str = config_path.to_string_lossy().to_string();
             let state_dir_str = state_dir.to_string_lossy().to_string();
+            let socket_path: Arc<str> = state_dir.join("dashboard.sock")
+                .to_string_lossy().to_string().into();
+            // Remove stale socket from a previous run.
+            let _ = std::fs::remove_file(socket_path.as_ref());
 
-            let candidates: Vec<std::path::PathBuf> = vec![
-                std::path::PathBuf::from("dashboard/dist-server/index.cjs"),
-            ];
-
-            if let Some(server_js) = candidates.into_iter().find(|p| p.exists()) {
-                let proxy_url = format!("http://127.0.0.1:{}", dashboard_port);
+            let server_js = std::path::PathBuf::from("dashboard/dist-server/index.cjs");
+            if server_js.exists() {
+                let sp = Arc::clone(&socket_path);
                 tokio::spawn(async move {
                     let mut cmd = tokio::process::Command::new("node");
                     cmd.arg(&server_js)
-                        .env("PORT", &dashboard_port)
+                        .env("UNIX_SOCKET", sp.as_ref())
                         .env("ORCHESTRATOR_API", &orch_api)
+                        .env("ORCHESTRATOR_WS_URL", &orch_ws)
                         .env("DASHBOARD_TOKEN", &dashboard_token)
                         .env("CONFIG_PATH", &config_path_str)
                         .env("STATE_DIR", &state_dir_str);
-                    info!("starting dashboard server on :{dashboard_port}");
+                    info!("starting dashboard server on unix:{sp}");
                     match cmd.spawn() {
                         Ok(mut child) => { let _ = child.wait().await; }
                         Err(e) => tracing::error!("failed to start dashboard server: {e}"),
                     }
                 });
-                Some(proxy_url)
+                Some(socket_path)
             } else {
                 info!("dashboard/dist-server/index.cjs not found - skipping dashboard spawn (run: cd dashboard && npm run build)");
                 None
@@ -404,10 +422,10 @@ async fn run(config_path: PathBuf) -> Result<()> {
                     .with_state(mcp_state),
             );
 
-            let app = if let Some(proxy_url) = dashboard_proxy_url {
-                info!("proxying dashboard requests to {proxy_url}");
+            let app = if let Some(socket) = dashboard_socket {
+                info!("proxying dashboard requests via unix:{socket}");
                 app.fallback(move |req: axum::extract::Request| {
-                    proxy_to_dashboard(proxy_url.clone(), req)
+                    proxy_to_dashboard(Arc::clone(&socket), req)
                 })
             } else {
                 app
