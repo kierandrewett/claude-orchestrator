@@ -93,6 +93,8 @@ impl Orchestrator {
             .filter(|s| !s.disabled)
             .map(|s| claude_shared::McpServerDef {
                 name: s.name,
+                url: s.url,
+                headers: s.headers,
                 command: s.command,
                 args: s.args,
                 env: s.env,
@@ -458,9 +460,15 @@ impl Orchestrator {
                     .unwrap_or_default();
                 self.bus.emit(OrchestratorEvent::McpList { entries, session_tools, trigger_ref });
             }
-            ParsedCommand::McpAdd { name, command, args } => {
+            ParsedCommand::McpAdd { name, url, token, command, args } => {
+                let mut headers = std::collections::HashMap::new();
+                if let Some(t) = token {
+                    headers.insert("Authorization".to_string(), format!("Bearer {t}"));
+                }
                 let result = self.mcp_registry.add(McpServerEntry {
                     name: name.clone(),
+                    url: url.clone(),
+                    headers,
                     command: command.clone(),
                     args: args.clone(),
                     env: Default::default(),

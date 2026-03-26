@@ -30,8 +30,9 @@ pub enum ParsedCommand {
     /// `/mcp [list]` — list configured MCP servers.
     McpList,
 
-    /// `/mcp add <name> <command> [args...]` — add a new MCP server.
-    McpAdd { name: String, command: String, args: Vec<String> },
+    /// `/mcp add NAME https://url [TOKEN]` — add a URL-based MCP server.
+    /// `/mcp add NAME command [args...]`   — add a stdio MCP server.
+    McpAdd { name: String, url: Option<String>, token: Option<String>, command: String, args: Vec<String> },
 
     /// `/mcp remove <name>` — remove a custom MCP server.
     McpRemove { name: String },
@@ -115,15 +116,20 @@ pub fn parse(text: &str) -> Result<ParsedCommand> {
                     let name = parts
                         .get(1)
                         .filter(|s| !s.is_empty())
-                        .ok_or_else(|| anyhow::anyhow!("usage: /mcp add NAME COMMAND [args...]"))?
+                        .ok_or_else(|| anyhow::anyhow!("usage: /mcp add NAME URL [TOKEN]\n       /mcp add NAME COMMAND [args...]"))?
                         .to_string();
-                    let command = parts
+                    let second = parts
                         .get(2)
                         .filter(|s| !s.is_empty())
-                        .ok_or_else(|| anyhow::anyhow!("usage: /mcp add NAME COMMAND [args...]"))?
+                        .ok_or_else(|| anyhow::anyhow!("usage: /mcp add NAME URL [TOKEN]\n       /mcp add NAME COMMAND [args...]"))?
                         .to_string();
-                    let args = parts[3..].iter().map(|s| s.to_string()).collect();
-                    Ok(ParsedCommand::McpAdd { name, command, args })
+                    if second.starts_with("http://") || second.starts_with("https://") {
+                        let token = parts.get(3).filter(|s| !s.is_empty()).map(|s| s.to_string());
+                        Ok(ParsedCommand::McpAdd { name, url: Some(second), token, command: String::new(), args: vec![] })
+                    } else {
+                        let args = parts[3..].iter().map(|s| s.to_string()).collect();
+                        Ok(ParsedCommand::McpAdd { name, url: None, token: None, command: second, args })
+                    }
                 }
                 Some("remove") => {
                     let name = parts

@@ -84,7 +84,10 @@ pub struct McpEntry {
     pub name: String,
     pub is_builtin: bool,
     pub enabled: bool,
-    /// None for built-in servers.
+    /// Set for URL-based (HTTP/SSE) servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// None for built-in or URL-based servers.
     pub command: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,

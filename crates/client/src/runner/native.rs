@@ -70,19 +70,22 @@ impl Runner for NativeRunner {
             if disabled.contains(srv.name.as_str()) {
                 continue;
             }
-            let srv_env: serde_json::Map<String, serde_json::Value> = srv
-                .env
-                .iter()
-                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-                .collect();
-            mcp_servers.insert(
-                srv.name.clone(),
-                serde_json::json!({
-                    "command": srv.command,
-                    "args": srv.args,
-                    "env": srv_env
-                }),
-            );
+            let entry = if let Some(ref url) = srv.url {
+                if srv.headers.is_empty() {
+                    serde_json::json!({ "type": "sse", "url": url })
+                } else {
+                    let hdrs: serde_json::Map<String, serde_json::Value> = srv.headers.iter()
+                        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                        .collect();
+                    serde_json::json!({ "type": "sse", "url": url, "headers": hdrs })
+                }
+            } else {
+                let srv_env: serde_json::Map<String, serde_json::Value> = srv.env.iter()
+                    .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                    .collect();
+                serde_json::json!({ "command": srv.command, "args": srv.args, "env": srv_env })
+            };
+            mcp_servers.insert(srv.name.clone(), entry);
         }
 
         let mcp_config = serde_json::json!({ "mcpServers": mcp_servers });

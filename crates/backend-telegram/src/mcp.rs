@@ -28,13 +28,12 @@ pub fn build_text(entries: &[McpEntry], session_tools: &[String]) -> String {
         let status = if e.enabled { "✅" } else { "❌" };
         let detail = if e.is_builtin {
             "built-in".to_string()
+        } else if let Some(ref url) = e.url {
+            format!("<code>{}</code>", crate::formatting::escape_html(url))
         } else {
             let mut parts = vec![e.command.as_deref().unwrap_or("").to_string()];
             parts.extend(e.args.iter().cloned());
-            format!(
-                "<code>{}</code>",
-                crate::formatting::escape_html(&parts.join(" "))
-            )
+            format!("<code>{}</code>", crate::formatting::escape_html(&parts.join(" ")))
         };
         lines.push(format!(
             "{status} <b>{}</b> — {}",
@@ -58,8 +57,8 @@ pub fn build_text(entries: &[McpEntry], session_tools: &[String]) -> String {
 
     lines.push(String::new());
     lines.push(
-        "Press a server to toggle it. Use <code>/mcp add &lt;name&gt; &lt;cmd&gt; [args…]</code> \
-         to add a new server."
+        "Press a server to toggle it. Use <code>/mcp add NAME URL [TOKEN]</code> or \
+         <code>/mcp add NAME CMD [args…]</code> to add a server."
             .to_string(),
     );
     lines.join("\n")

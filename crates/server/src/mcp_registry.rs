@@ -9,6 +9,12 @@ use tracing::{error, info};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerEntry {
     pub name: String,
+    /// URL for HTTP/SSE transport. When set, `command` and `args` are ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub headers: HashMap<String, String>,
+    #[serde(default)]
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
@@ -153,6 +159,7 @@ impl McpServerRegistry {
             name: "orchestrator".to_string(),
             is_builtin: true,
             enabled: !disabled_set.contains("orchestrator"),
+            url: None,
             command: None,
             args: vec![],
         }];
@@ -161,7 +168,8 @@ impl McpServerRegistry {
                 name: s.name.clone(),
                 is_builtin: false,
                 enabled: !s.disabled && !disabled_set.contains(s.name.as_str()),
-                command: Some(s.command.clone()),
+                url: s.url.clone(),
+                command: if s.url.is_some() { None } else { Some(s.command.clone()) },
                 args: s.args.clone(),
             });
         }
