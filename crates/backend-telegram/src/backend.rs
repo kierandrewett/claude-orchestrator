@@ -239,6 +239,7 @@ impl MessagingBackend for TelegramBackend {
             use teloxide::types::BotCommand;
             let commands = vec![
                 BotCommand::new("help",      "Show available commands"),
+                BotCommand::new("new",       "Create a new task: /new [profile] [prompt]"),
                 BotCommand::new("status",    "List all tasks"),
                 BotCommand::new("cancel",    "Interrupt the current Claude response"),
                 BotCommand::new("stop",      "Stop the current (or specified) task"),

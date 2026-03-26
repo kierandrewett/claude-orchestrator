@@ -81,6 +81,13 @@ pub fn parse(text: &str) -> Result<ParsedCommand> {
             Ok(ParsedCommand::Stop { task_id })
         }
 
+        "/new" => {
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            let profile = parts.next().filter(|s| !s.is_empty()).unwrap_or("base").to_string();
+            let prompt = parts.next().map(str::trim).unwrap_or("").to_string();
+            Ok(ParsedCommand::New { profile, prompt })
+        }
+
         "/status" => Ok(ParsedCommand::Status),
 
         "/cost" => Ok(ParsedCommand::Cost { all: rest == "all" }),
