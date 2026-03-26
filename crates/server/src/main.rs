@@ -312,7 +312,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
     let dashboard_proxy_url: Option<String> = if let Some(ref web_cfg) = config.backends.web {
         if web_cfg.enabled {
             let api_bind = web_cfg.bind.clone().unwrap_or_else(|| "0.0.0.0:8080".to_string());
-            let orch_api = format!("http://{}", api_bind.replace("0.0.0.0", "localhost"));
+            let orch_api = format!("http://{}", api_bind.replace("0.0.0.0", "127.0.0.1"));
             let dashboard_port = web_cfg.dashboard_bind.as_deref()
                 .unwrap_or("0.0.0.0:3001")
                 .split(':').last().unwrap_or("3001").to_string();
@@ -325,7 +325,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
             ];
 
             if let Some(server_js) = candidates.into_iter().find(|p| p.exists()) {
-                let proxy_url = format!("http://localhost:{}", dashboard_port);
+                let proxy_url = format!("http://127.0.0.1:{}", dashboard_port);
                 tokio::spawn(async move {
                     let mut cmd = tokio::process::Command::new("node");
                     cmd.arg(&server_js)
