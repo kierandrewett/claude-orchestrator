@@ -55,8 +55,9 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY --from=server /app/target/release/claude-orchestrator ./
-COPY --from=dashboard /app/dashboard/dist        ./dashboard/dist
-COPY --from=dashboard /app/dashboard/dist-server ./dashboard/dist-server
+COPY --from=dashboard /app/dashboard/dist         ./dashboard/dist
+COPY --from=dashboard /app/dashboard/dist-server  ./dashboard/dist-server
+COPY --from=dashboard /app/dashboard/node_modules ./dashboard/node_modules
 
 VOLUME ["/app/data"]
 EXPOSE 8080
