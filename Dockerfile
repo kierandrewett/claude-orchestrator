@@ -1,3 +1,12 @@
+# ── Stage 1: Build dashboard ───────────────────────────────────────────────────
+FROM node:20-slim AS dashboard
+WORKDIR /app/dashboard
+COPY dashboard/package.json dashboard/package-lock.json ./
+RUN npm install --legacy-peer-deps
+COPY dashboard/ ./
+RUN npm run build
+
+# ── Stage 2: Build Rust server ────────────────────────────────────────────────
 FROM rust:1.88-slim AS server
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
@@ -41,11 +50,13 @@ RUN find crates/server/src crates/shared/src crates/events/src crates/db/src cra
 # ── Stage 3: Minimal runtime image ────────────────────────────────────────────
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y ca-certificates libssl3 \
+    && apt-get install -y ca-certificates libssl3 nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY --from=server /app/target/release/claude-orchestrator ./
+COPY --from=dashboard /app/dashboard/dist        ./dashboard/dist
+COPY --from=dashboard /app/dashboard/dist-server ./dashboard/dist-server
 
 VOLUME ["/app/data"]
 EXPOSE 8080
