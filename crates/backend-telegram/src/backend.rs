@@ -100,6 +100,9 @@ struct TaskTopicState {
     last_reaction: Option<(i32, String)>,
     /// Timestamp of the last tool-group edit, used to rate-limit edits to ~1 per 2 s.
     last_tool_edit_at: Option<std::time::Instant>,
+    /// Options from an outstanding AskUserQuestion call, stored so the inline
+    /// button callback can look them up by index.
+    pending_question_options: Vec<String>,
 }
 
 impl TaskTopicState {
@@ -121,6 +124,7 @@ impl TaskTopicState {
             display_title: String::new(),
             last_reaction: None,
             last_tool_edit_at: None,
+            pending_question_options: Vec::new(),
         }
     }
 }
@@ -350,12 +354,14 @@ impl MessagingBackend for TelegramBackend {
                     let last_mcp_msg_cb = Arc::clone(&last_mcp_msg);
                     let last_events_msg_cb = Arc::clone(&last_events_msg);
                     let dashboard_url_cb = dashboard_url.clone();
+                    let task_states_cb = Arc::clone(&task_states_clone);
                     move |query: CallbackQuery| {
                         let bot_cb = bot_cb.clone();
                         let sender_cb = sender_cb.clone();
                         let last_mcp_msg_cb = Arc::clone(&last_mcp_msg_cb);
                         let last_events_msg_cb = Arc::clone(&last_events_msg_cb);
                         let dashboard_url_cb = dashboard_url_cb.clone();
+                        let task_states_cb = Arc::clone(&task_states_cb);
                         async move {
                             match query.data.as_deref() {
                                 Some(d) if d.starts_with("mcp:") => {
@@ -364,6 +370,26 @@ impl MessagingBackend for TelegramBackend {
                                 }
                                 Some(d) if d.starts_with("evt:") => {
                                     crate::events::handle_callback(bot_cb, query, sender_cb, last_events_msg_cb).await;
+                                }
+                                Some(d) if d.starts_with(crate::ask_question::AQ_PREFIX) => {
+                                    // Format: "aq:{task_id}:{index}" — extract before moving query.
+                                    let rest = d[crate::ask_question::AQ_PREFIX.len()..].to_string();
+                                    let parsed = rest.rfind(':').and_then(|sep| {
+                                        let task_id = rest[..sep].to_string();
+                                        let idx: usize = rest[sep + 1..].parse().ok()?;
+                                        Some((task_id, idx))
+                                    });
+                                    drop(d);
+                                    if let Some((task_id, idx)) = parsed {
+                                        let option_text = task_states_cb
+                                            .lock().await
+                                            .get(&task_id)
+                                            .and_then(|s| s.pending_question_options.get(idx))
+                                            .cloned();
+                                        if let Some(text) = option_text {
+                                            crate::ask_question::handle_callback(bot_cb, query, sender_cb, &task_id, &text).await;
+                                        }
+                                    }
                                 }
                                 _ => {
                                     help::handle_callback(bot_cb, query, dashboard_url_cb.as_deref()).await;
@@ -612,6 +638,21 @@ async fn handle_orch_event(
                 return;
             }
             state.pending_tool_hidden = false;
+
+            // AskUserQuestion: render as a formatted message with inline buttons
+            // instead of the normal tool-group display.
+            if tool_name == "AskUserQuestion" {
+                state.pending_tool_hidden = true; // suppress ToolCompleted display too
+                if let Some((header, question, options)) = crate::ask_question::parse(summary) {
+                    state.pending_question_options = options.clone();
+                    let reply_to = telegram_msg_id(trigger_ref).or(state.last_bot_message_id);
+                    crate::ask_question::send(
+                        bot, group_id, thread_id, reply_to,
+                        &task_id.0, &header, &question, &options,
+                    ).await;
+                }
+                return;
+            }
 
             // Agent tool: always start a fresh group so the agent header + its
             // sub-tools get their own message, separate from the parent's tools.

@@ -130,6 +130,9 @@ async fn do_run<R: Runner>(
 
     // Messages that arrived while Claude was busy, waiting to be delivered.
     let mut queue: VecDeque<PendingMessage> = VecDeque::new();
+    // True when Claude called AskUserQuestion and is blocked on stdin mid-turn.
+    // The next user message bypasses the queue and goes straight to stdin.
+    let mut waiting_for_answer = false;
 
     ws_send(
         ws_tx,
@@ -155,12 +158,15 @@ async fn do_run<R: Runner>(
             cmd = cmd_rx.recv() => match cmd {
                 Some(S2C::SendInput { text, message_ref_opaque_id, .. }) => {
                     idle_sleep.as_mut().reset(tokio::time::Instant::now() + IDLE_TIMEOUT);
-                    if claude_busy {
+                    if claude_busy && !waiting_for_answer {
                         info!("session {session_id}: Claude busy — queuing message ({} already queued)", queue.len());
                         queue.push_back(PendingMessage::Text { text, msg_ref_opaque_id: message_ref_opaque_id });
                     } else {
                         send_to_stdin(&mut stdin, session_id, format_user_message(&text)).await?;
-                        claude_busy = true;
+                        waiting_for_answer = false;
+                        if !claude_busy {
+                            claude_busy = true;
+                        }
                     }
                 }
                 Some(S2C::SendInputWithFiles { text, files, message_ref_opaque_id, .. }) => {
@@ -215,9 +221,18 @@ async fn do_run<R: Runner>(
                     log_ndjson_in(session_id, &line);
                     match serde_json::from_str::<serde_json::Value>(&line) {
                         Ok(event) => {
+                            // Detect AskUserQuestion tool use: Claude Code will block stdin
+                            // mid-turn waiting for the user's answer. Set the flag so the
+                            // next SendInput bypasses the queue and goes straight to stdin.
+                            if has_ask_user_question(&event) {
+                                info!("session {session_id}: AskUserQuestion detected — next user message will bypass queue");
+                                waiting_for_answer = true;
+                            }
+
                             // A "result" event means Claude finished a turn and is idle.
                             // Deliver the next queued message if any.
                             if event.get("type").and_then(|t| t.as_str()) == Some("result") {
+                                waiting_for_answer = false;
                                 claude_busy = false;
                                 if let Some(next) = queue.pop_front() {
                                     info!("session {session_id}: turn complete — delivering queued message ({} remaining)", queue.len());
@@ -465,6 +480,22 @@ pub async fn format_user_message_with_files(text: &str, files: &[AttachedFile]) 
     let content_json =
         serde_json::to_string(&blocks).unwrap_or_else(|_| r#""[serialisation error]""#.to_string());
     format!("{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":{content_json}}}}}\n")
+}
+
+/// Returns true if the NDJSON event is an assistant message containing an
+/// AskUserQuestion tool use. In that case Claude Code will block stdin
+/// waiting for the user's response before emitting a "result" event.
+fn has_ask_user_question(event: &serde_json::Value) -> bool {
+    if event.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+        return false;
+    }
+    let Some(content) = event.pointer("/message/content").and_then(|c| c.as_array()) else {
+        return false;
+    };
+    content.iter().any(|block| {
+        block.get("type").and_then(|t| t.as_str()) == Some("tool_use")
+            && block.get("name").and_then(|n| n.as_str()) == Some("AskUserQuestion")
+    })
 }
 
 fn format_user_message(text: &str) -> String {
