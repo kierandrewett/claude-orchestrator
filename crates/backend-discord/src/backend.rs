@@ -361,7 +361,8 @@ async fn handle_orch_event(
         | OrchestratorEvent::ClientConnected { .. }
         | OrchestratorEvent::ClientDisconnected { .. }
         | OrchestratorEvent::SchedulerMessage { .. }
-        | OrchestratorEvent::ScheduledEventFired { .. } => {}
+        | OrchestratorEvent::ScheduledEventFired { .. }
+        | OrchestratorEvent::McpAuthUrl { .. } => {}
     }
 }
 
@@ -427,6 +428,7 @@ fn event_name(event: &OrchestratorEvent) -> &'static str {
         OrchestratorEvent::ClientDisconnected { .. } => "ClientDisconnected",
         OrchestratorEvent::SchedulerMessage { .. } => "SchedulerMessage",
         OrchestratorEvent::ScheduledEventFired { .. } => "ScheduledEventFired",
+        OrchestratorEvent::McpAuthUrl { .. } => "McpAuthUrl",
     }
 }
 

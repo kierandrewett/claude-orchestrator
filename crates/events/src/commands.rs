@@ -58,6 +58,10 @@ pub enum ParsedCommand {
     /// Used when MCP config changes and we want existing tasks to restart
     /// with fresh config on their next run.
     Wake,
+
+    /// Start an OAuth flow for a URL-based MCP server.
+    /// `redirect_uri` is where the browser should land after the user authorises.
+    McpAuth { name: String, redirect_uri: String },
 }
 
 /// Parse a text string beginning with `/` into a `ParsedCommand`.

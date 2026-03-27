@@ -287,6 +287,8 @@ impl MessagingBackend for TelegramBackend {
             });
         }
 
+        let dashboard_url_for_loop = Arc::clone(&dashboard_url);
+
         // --- Incoming message + reaction handler ---
         {
             let bot_clone = bot.clone();
@@ -357,7 +359,8 @@ impl MessagingBackend for TelegramBackend {
                         async move {
                             match query.data.as_deref() {
                                 Some(d) if d.starts_with("mcp:") => {
-                                    crate::mcp::handle_callback(bot_cb, query, sender_cb, last_mcp_msg_cb).await;
+                                    let du = (*dashboard_url_cb).clone();
+                                    crate::mcp::handle_callback(bot_cb, query, sender_cb, last_mcp_msg_cb, du).await;
                                 }
                                 Some(d) if d.starts_with("evt:") => {
                                     crate::events::handle_callback(bot_cb, query, sender_cb, last_events_msg_cb).await;
@@ -400,6 +403,7 @@ impl MessagingBackend for TelegramBackend {
         // can sync topic names (e.g. add/remove 💤 for hibernated tasks).
         let _ = backend_sender.send(BackendEvent::SyncRequest).await;
 
+
         // --- Orchestrator event loop ---
         loop {
             let event = match orchestrator_events.recv().await {
@@ -416,7 +420,7 @@ impl MessagingBackend for TelegramBackend {
 
             let mut states = task_states.lock().await;
             let mut t2t = thread_to_task.lock().await;
-            handle_orch_event(&bot, group_id, &event, &mut states, &mut t2t, &state_dir, &hidden_tools, &topic_icon_cache, &last_mcp_msg, &last_events_msg).await;
+            handle_orch_event(&bot, group_id, &event, &mut states, &mut t2t, &state_dir, &hidden_tools, &topic_icon_cache, &last_mcp_msg, &last_events_msg, dashboard_url_for_loop.as_deref()).await;
         }
     }
 }
@@ -457,6 +461,7 @@ async fn handle_orch_event(
     topic_icon_cache: &HashMap<String, String>,
     last_mcp_msg: &crate::mcp::LastMcpMsg,
     last_events_msg: &crate::events::LastEventsMsg,
+    dashboard_url: Option<&str>,
 ) {
     match event {
         OrchestratorEvent::TaskCreated { task_id, name, initial_prompt, .. } => {
@@ -1011,14 +1016,14 @@ async fn handle_orch_event(
                 .map_or(false, |r| !r.opaque_id.starts_with("btn:"));
             if !is_direct_command {
                 if let Some((chat_id, msg_id)) = *guard {
-                    crate::mcp::edit_mcp_list(bot, chat_id, msg_id, entries, session_tools).await;
+                    crate::mcp::edit_mcp_list(bot, chat_id, msg_id, entries, session_tools, dashboard_url.as_deref()).await;
                     return;
                 }
             }
             let thread_id = telegram_thread_id(trigger_ref);
             let reply_to = telegram_msg_id(trigger_ref);
             if let Some(msg_id) =
-                crate::mcp::send_mcp_list(bot, group_id, thread_id, reply_to, entries, session_tools).await
+                crate::mcp::send_mcp_list(bot, group_id, thread_id, reply_to, entries, session_tools, dashboard_url.as_deref()).await
             {
                 *guard = Some((group_id, msg_id));
             }
@@ -1074,6 +1079,34 @@ async fn handle_orch_event(
                 escape_html(schedule),
             );
             send_text_reply(bot, group_id, thread_id, &html, None, false).await;
+        }
+
+        OrchestratorEvent::McpAuthUrl { server_name, auth_url, trigger_ref } => {
+            use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, ParseMode};
+            let text = format!(
+                "🔐 <b>{}</b> needs authorisation.\n\nTap the button below to log in, then tap <b>Refresh</b> in the /mcp list.",
+                crate::formatting::escape_html(&server_name)
+            );
+            let keyboard = InlineKeyboardMarkup::new(vec![
+                vec![InlineKeyboardButton::url(
+                    format!("Authorize {server_name}"),
+                    auth_url.parse().unwrap_or_else(|_| "https://example.com".parse().unwrap()),
+                )],
+            ]);
+            let thread_id = telegram_thread_id(&trigger_ref);
+            let reply_to = telegram_msg_id(&trigger_ref);
+            let mut req = bot
+                .send_message(group_id, text)
+                .parse_mode(ParseMode::Html)
+                .reply_markup(keyboard);
+            if let Some(tid) = thread_id {
+                req = req.message_thread_id(tid);
+            }
+            if let Some(id) = reply_to {
+                use teloxide::types::ReplyParameters;
+                req = req.reply_parameters(ReplyParameters::new(teloxide::types::MessageId(id as i32)));
+            }
+            let _ = req.await;
         }
 
         OrchestratorEvent::ScheduledEventFired { .. } => {

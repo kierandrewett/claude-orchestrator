@@ -193,8 +193,16 @@ impl McpServerRegistry {
             url: None,
             command: None,
             args: vec![],
+            needs_oauth: false,
         }];
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         for s in &data.custom {
+            let has_valid_token = s.oauth_access_token.as_deref().is_some_and(|t| !t.is_empty())
+                && s.oauth_token_expires_at.map_or(true, |exp| now_secs < exp.saturating_sub(60));
+            let needs_oauth = s.url.is_some() && !has_valid_token;
             entries.push(claude_events::McpEntry {
                 name: s.name.clone(),
                 is_builtin: false,
@@ -202,6 +210,7 @@ impl McpServerRegistry {
                 url: s.url.clone(),
                 command: if s.url.is_some() { None } else { Some(s.command.clone()) },
                 args: s.args.clone(),
+                needs_oauth,
             });
         }
         entries

@@ -163,6 +163,9 @@ fn print_event(ev: &OrchestratorEvent) {
                 println!("  {status} {} — {} — next: {next}", e.name, e.schedule);
             }
         }
+        OrchestratorEvent::McpAuthUrl { server_name, auth_url, .. } => {
+            println!("[mcp] 🔐 '{server_name}' needs OAuth. Authorize at: {auth_url}");
+        }
     }
 }
 

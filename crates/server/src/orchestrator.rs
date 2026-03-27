@@ -13,8 +13,11 @@ use claude_shared::S2C;
 use crate::client_registry::ClientRegistry;
 use crate::commands::{build_cost, build_events_info, build_events_list_entries, build_status};
 use crate::config::OrchestratorConfig;
+use crate::mcp_oauth::PendingOAuth;
 use crate::mcp_registry::{McpServerEntry, McpServerRegistry};
 use crate::task_manager::{Task, TaskRegistry, TaskState};
+
+pub type PendingOAuthMap = Arc<std::sync::Mutex<std::collections::HashMap<String, PendingOAuth>>>;
 
 pub struct Orchestrator {
     pub bus: Arc<EventBus>,
@@ -25,6 +28,8 @@ pub struct Orchestrator {
     pub store: Arc<crate::persistence::StateStore>,
     pub mcp_registry: Arc<McpServerRegistry>,
     pub db: Db,
+    /// Shared pending OAuth state (also used by the HTTP callback handler).
+    pub pending_oauth: PendingOAuthMap,
     /// Merged MCP env extras from all backend capability announcements.
     backend_caps: std::sync::Mutex<std::collections::HashMap<String, String>>,
 }
@@ -38,8 +43,9 @@ impl Orchestrator {
         store: Arc<crate::persistence::StateStore>,
         mcp_registry: Arc<McpServerRegistry>,
         db: Db,
+        pending_oauth: PendingOAuthMap,
     ) -> Self {
-        Self { bus, registry, clients, config, store, mcp_registry, db, backend_caps: Default::default() }
+        Self { bus, registry, clients, config, store, mcp_registry, db, pending_oauth, backend_caps: Default::default() }
     }
 
     fn backend_mcp_extra_env(&self) -> std::collections::HashMap<String, String> {
@@ -612,6 +618,39 @@ impl Orchestrator {
             ParsedCommand::Wake => {
                 if let Some(id) = task_id {
                     self.wake_task(&id, trigger_ref).await;
+                }
+            }
+            ParsedCommand::McpAuth { name, redirect_uri } => {
+                // Find the server URL.
+                let url = self.mcp_registry.custom_servers()
+                    .into_iter()
+                    .find(|s| s.name == name)
+                    .and_then(|s| s.url);
+                let Some(url) = url else {
+                    let text = format!("MCP server '{}' not found or has no URL.", name);
+                    self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
+                    return;
+                };
+                match crate::mcp_oauth::start_flow(&name, &url, &redirect_uri).await {
+                    Err(e) => {
+                        let text = format!("OAuth discovery failed for '{}': {}", name, e);
+                        self.bus.emit(OrchestratorEvent::CommandResponse { task_id, text, trigger_ref });
+                    }
+                    Ok((auth_url, pending)) => {
+                        // Extract the `state` param so we can key the pending entry.
+                        let state_param = auth_url.split("state=")
+                            .nth(1)
+                            .map(|s| s.split('&').next().unwrap_or(s).to_string());
+                        if let Some(state_key) = state_param {
+                            self.pending_oauth.lock().unwrap().insert(state_key, pending);
+                        }
+                        // Emit the auth URL so backends can present it to the user.
+                        self.bus.emit(OrchestratorEvent::McpAuthUrl {
+                            server_name: name,
+                            auth_url,
+                            trigger_ref,
+                        });
+                    }
                 }
             }
         }

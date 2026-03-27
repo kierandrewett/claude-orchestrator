@@ -19,13 +19,20 @@ pub type LastMcpMsg = Arc<Mutex<Option<(ChatId, MessageId)>>>;
 const CB_MCP_REFRESH: &str = "mcp:refresh";
 const CB_MCP_ON_PREFIX: &str = "mcp:on:";
 const CB_MCP_OFF_PREFIX: &str = "mcp:off:";
+const CB_MCP_AUTH_PREFIX: &str = "mcp:auth:";
 
 // ── UI builders ───────────────────────────────────────────────────────────────
 
 pub fn build_text(entries: &[McpEntry], session_tools: &[String]) -> String {
     let mut lines = vec!["<b>🔧 MCP Servers</b>".to_string(), String::new()];
     for e in entries {
-        let status = if e.enabled { "✅" } else { "❌" };
+        let status = if e.needs_oauth && e.enabled {
+            "🔑"
+        } else if e.enabled {
+            "✅"
+        } else {
+            "❌"
+        };
         let detail = if e.is_builtin {
             "built-in".to_string()
         } else if let Some(ref url) = e.url {
@@ -57,29 +64,33 @@ pub fn build_text(entries: &[McpEntry], session_tools: &[String]) -> String {
 
     lines.push(String::new());
     lines.push(
-        "Press a server to toggle it. Use <code>/mcp add NAME URL [TOKEN]</code> or \
+        "Press a server to toggle it. 🔑 = needs auth. Use <code>/mcp add NAME URL [TOKEN]</code> or \
          <code>/mcp add NAME CMD [args…]</code> to add a server."
             .to_string(),
     );
     lines.join("\n")
 }
 
-fn build_keyboard(entries: &[McpEntry]) -> InlineKeyboardMarkup {
+fn build_keyboard(entries: &[McpEntry], has_dashboard: bool) -> InlineKeyboardMarkup {
     let mut rows: Vec<Vec<InlineKeyboardButton>> = entries
         .iter()
         .map(|e| {
+            let mut row = Vec::new();
+            // Toggle button
             let (label, data) = if e.enabled {
-                (
-                    format!("✅ {}", e.name),
-                    format!("{}{}", CB_MCP_OFF_PREFIX, e.name),
-                )
+                (format!("✅ {}", e.name), format!("{}{}", CB_MCP_OFF_PREFIX, e.name))
             } else {
-                (
-                    format!("❌ {}", e.name),
-                    format!("{}{}", CB_MCP_ON_PREFIX, e.name),
-                )
+                (format!("❌ {}", e.name), format!("{}{}", CB_MCP_ON_PREFIX, e.name))
             };
-            vec![InlineKeyboardButton::callback(label, data)]
+            row.push(InlineKeyboardButton::callback(label, data));
+            // Authorize button for URL servers needing OAuth (only if we have a dashboard URL)
+            if e.needs_oauth && e.enabled && has_dashboard {
+                row.push(InlineKeyboardButton::callback(
+                    "🔑 Authorize",
+                    format!("{}{}", CB_MCP_AUTH_PREFIX, e.name),
+                ));
+            }
+            row
         })
         .collect();
     rows.push(vec![InlineKeyboardButton::callback("🔄 Refresh", CB_MCP_REFRESH)]);
@@ -96,11 +107,12 @@ pub async fn send_mcp_list(
     reply_to: Option<i32>,
     entries: &[McpEntry],
     session_tools: &[String],
+    dashboard_url: Option<&str>,
 ) -> Option<MessageId> {
     let mut req = bot
         .send_message(chat_id, build_text(entries, session_tools))
         .parse_mode(ParseMode::Html)
-        .reply_markup(build_keyboard(entries));
+        .reply_markup(build_keyboard(entries, dashboard_url.is_some()));
     if let Some(tid) = thread_id {
         req = req.message_thread_id(tid);
     }
@@ -118,11 +130,18 @@ pub async fn send_mcp_list(
 }
 
 /// Edit an existing MCP list message in place.
-pub async fn edit_mcp_list(bot: &Bot, chat_id: ChatId, message_id: MessageId, entries: &[McpEntry], session_tools: &[String]) {
+pub async fn edit_mcp_list(
+    bot: &Bot,
+    chat_id: ChatId,
+    message_id: MessageId,
+    entries: &[McpEntry],
+    session_tools: &[String],
+    dashboard_url: Option<&str>,
+) {
     let _ = bot
         .edit_message_text(chat_id, message_id, build_text(entries, session_tools))
         .parse_mode(ParseMode::Html)
-        .reply_markup(build_keyboard(entries))
+        .reply_markup(build_keyboard(entries, dashboard_url.is_some()))
         .await;
 }
 
@@ -133,6 +152,7 @@ pub async fn handle_callback(
     query: CallbackQuery,
     sender: mpsc::Sender<BackendEvent>,
     last_mcp_msg: LastMcpMsg,
+    dashboard_url: Option<String>,
 ) {
     let data = match query.data.as_deref() {
         Some(d) if d.starts_with("mcp:") => d,
@@ -152,6 +172,12 @@ pub async fn handle_callback(
         ParsedCommand::McpEnable { name: name.to_string() }
     } else if let Some(name) = data.strip_prefix(CB_MCP_OFF_PREFIX) {
         ParsedCommand::McpDisable { name: name.to_string() }
+    } else if let Some(name) = data.strip_prefix(CB_MCP_AUTH_PREFIX) {
+        let redirect_uri = dashboard_url
+            .as_deref()
+            .map(|u| format!("{}/api/mcp/oauth-callback", u.trim_end_matches('/')))
+            .unwrap_or_default();
+        ParsedCommand::McpAuth { name: name.to_string(), redirect_uri }
     } else {
         return;
     };

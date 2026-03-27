@@ -372,6 +372,10 @@ async fn run(config_path: PathBuf) -> Result<()> {
         None
     };
 
+    // Shared pending OAuth state (used by both the orchestrator and HTTP callback).
+    let pending_oauth: orchestrator::PendingOAuthMap =
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+
     // Client-daemon WebSocket server.
     {
         let bind = config.server.client_bind.clone();
@@ -381,6 +385,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
         let mcp_token = config.server.client_token.clone();
         let db_for_mcp = db.clone();
         let mcp_registry_for_spawn = Arc::clone(&mcp_registry);
+        let pending_oauth = Arc::clone(&pending_oauth);
         tokio::spawn(async move {
             let mcp_registry = mcp_registry_for_spawn;
             let session_api_state = SessionApiState {
@@ -452,7 +457,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
                 backend_tx: b.backend_sender(),
                 db: db_for_api,
                 mcp_registry: mcp_registry_for_api,
-                pending_oauth: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+                pending_oauth: Arc::clone(&pending_oauth),
             };
 
             let app = Router::new()
@@ -520,6 +525,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
         Arc::clone(&store),
         Arc::clone(&mcp_registry),
         db,
+        Arc::clone(&pending_oauth),
     ));
 
     // Handle Ctrl-C / SIGTERM.

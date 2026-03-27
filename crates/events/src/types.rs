@@ -91,6 +91,9 @@ pub struct McpEntry {
     pub command: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
+    /// true = URL server with no valid OAuth token stored; user must authorise.
+    #[serde(default)]
+    pub needs_oauth: bool,
 }
 
 // ── EventListEntry — lightweight view of a scheduled event for UI rendering ───
