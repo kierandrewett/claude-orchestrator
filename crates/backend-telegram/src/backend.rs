@@ -18,7 +18,7 @@ use crate::formatting::{
     format_error, format_thinking, format_tool_completed, format_tool_started,
     format_turn_complete, md_to_telegram_html, split_emoji_from_title,
 };
-use crate::reactions::{apply_reaction, clear_reaction, ReactionTracker};
+use crate::reactions::{apply_reaction, ReactionTracker};
 use crate::streaming::StreamingState;
 
 /// Configuration for the Telegram backend.
@@ -531,9 +531,9 @@ async fn handle_orch_event(
                     .or_insert_with(|| TaskTopicState::new(None));
                 // Track the queued message so we can handle ❌ reactions later.
                 state.queued_messages.push((msg_id, message_ref.clone()));
-                // Apply 🤔 reaction to let the user know their message is queued.
-                apply_reaction(bot, group_id, MessageId(msg_id), "🤔").await;
-                debug!("telegram: applied 🤔 reaction to queued message {msg_id}");
+                // Apply 🕐 reaction to let the user know their message is queued.
+                apply_reaction(bot, group_id, MessageId(msg_id), "🕐").await;
+                debug!("telegram: applied 🕐 reaction to queued message {msg_id}");
             }
         }
 
@@ -847,14 +847,16 @@ async fn handle_orch_event(
             task_id,
             original_ref,
         } => {
-            // The queued message was delivered to Claude — remove ⏰ reaction.
+            // The queued message was delivered to Claude's input queue.
+            // Do NOT clear the 🕐 reaction here — it will be replaced naturally when
+            // PhaseChanged { Acknowledged } fires for this message, giving the user a
+            // clear signal that Claude is actually starting to work on their message.
             if let Some(msg_id) = parse_telegram_msg_id(&original_ref.backend, &original_ref.opaque_id) {
                 let state = states
                     .entry(task_id.0.clone())
                     .or_insert_with(|| TaskTopicState::new(None));
                 state.queued_messages.retain(|(id, _)| *id != msg_id);
-                clear_reaction(bot, group_id, MessageId(msg_id)).await;
-                debug!("telegram: cleared ⏰ reaction from delivered message {msg_id}");
+                debug!("telegram: queued message {msg_id} delivered — keeping 🕐 until PhaseChanged fires");
             }
         }
 
