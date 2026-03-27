@@ -296,6 +296,7 @@ impl Orchestrator {
         match task_summary {
             Some(TaskStateSummary::Running) => {
                 // Happy path: update state and forward the message.
+                let was_idle = self.registry.with(task_id, |t| t.claude_idle).unwrap_or(true);
                 let session_id = self.registry.with_mut(task_id, |t| {
                     t.claude_idle = false;
                     t.current_trigger = msg_ref.clone();
@@ -307,11 +308,17 @@ impl Orchestrator {
                     }
                 }).flatten();
 
-                self.bus.emit(OrchestratorEvent::PhaseChanged {
-                    task_id: task_id.clone(),
-                    phase: SessionPhase::Responding,
-                    trigger_message: msg_ref.clone(),
-                });
+                // Only emit Responding immediately when Claude was idle and will start right away.
+                // If Claude was busy (message is queued), suppress this — the System event from
+                // client_ws will emit PhaseChanged { Responding } when Claude actually starts the
+                // next turn, so the 🕐 queued reaction persists until Claude is truly working.
+                if was_idle {
+                    self.bus.emit(OrchestratorEvent::PhaseChanged {
+                        task_id: task_id.clone(),
+                        phase: SessionPhase::Responding,
+                        trigger_message: msg_ref.clone(),
+                    });
+                }
 
                 if let Some(sid) = session_id {
                     let message_ref_opaque_id = msg_ref.map(|r| r.opaque_id);
